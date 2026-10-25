@@ -12,6 +12,7 @@ mod pty;
 mod routes;
 mod state;
 mod tunnel;
+mod update;
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -80,6 +81,18 @@ enum Cmd {
         #[arg(long)]
         token: String,
     },
+    /// アップデート適用後の再起動ヘルパー（内部利用・手動実行しない）
+    #[command(hide = true)]
+    UpdateFinalize {
+        #[arg(long)]
+        data_dir: PathBuf,
+        #[arg(long)]
+        wait_pid: Option<u32>,
+        #[arg(long)]
+        service: bool,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        relaunch: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -145,6 +158,9 @@ fn main() {
             1
         }
         Cmd::Mcp { url, token } => mcp::run(url, token),
+        Cmd::UpdateFinalize { data_dir, wait_pid, service, relaunch } => {
+            update::finalize(data_dir, wait_pid, service, relaunch)
+        }
     };
     std::process::exit(code);
 }
@@ -172,7 +188,21 @@ fn do_serve(bind: Option<String>, port: Option<u16>, data_dir: Option<PathBuf>) 
                 let _ = tx.send(true);
             }
         });
-        run_server(data_dir, bind, port, sd_rx).await
+        // アップデート適用後に同じ設定で再起動するための引数定義
+        let mut relaunch = vec![
+            "serve".to_string(),
+            "--data-dir".to_string(),
+            data_dir.display().to_string(),
+        ];
+        if let Some(b) = bind.as_ref() {
+            relaunch.push("--bind".into());
+            relaunch.push(b.clone());
+        }
+        if let Some(p) = port.as_ref() {
+            relaunch.push("--port".into());
+            relaunch.push(p.to_string());
+        }
+        run_server(data_dir, bind, port, sd_tx, sd_rx, update::RestartMode::foreground(relaunch)).await
     })
 }
 
@@ -181,7 +211,9 @@ pub async fn run_server(
     data_dir: PathBuf,
     bind: Option<String>,
     port: Option<u16>,
+    shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
+    restart: update::RestartMode,
 ) -> i32 {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -222,6 +254,12 @@ pub async fn run_server(
         tunnel.start(cfg.port);
     }
 
+    let update = update::UpdateManager::new(
+        data_dir.clone(),
+        env!("CARGO_PKG_VERSION").to_string(),
+        shutdown_tx,
+        restart,
+    );
     let state: SharedState = Arc::new(AppState {
         config: RwLock::new(cfg),
         auth,
@@ -230,6 +268,7 @@ pub async fn run_server(
         metrics,
         tunnel,
         terminals: TerminalManager::new(),
+        update,
         setup_done: true,
         version: env!("CARGO_PKG_VERSION"),
     });
@@ -241,6 +280,34 @@ pub async fn run_server(
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 auth.flush_if_dirty();
+            }
+        });
+    }
+
+    // 定期アップデート確認（auto_check 有効時）。auto_install が有効なら検証・適用まで行う。
+    {
+        let st = state.clone();
+        tokio::spawn(async move {
+            // 起動直後はサーバーが安定してから確認する
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            loop {
+                let (auto_check, auto_install, hours, repo) = {
+                    let c = st.config.read().unwrap();
+                    (c.update.auto_check, c.update.auto_install, c.update.check_interval_hours, c.update.repo.clone())
+                };
+                if auto_check {
+                    if let Ok(Some(rel)) = st.update.check(&repo).await {
+                        let newer = matches!(
+                            update::compare_versions(&rel.version, st.version),
+                            std::cmp::Ordering::Greater
+                        );
+                        if auto_install && newer {
+                            let _ = st.update.install().await;
+                        }
+                    }
+                }
+                let secs = (hours.max(1) as u64) * 3600;
+                tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
             }
         });
     }

@@ -3,6 +3,7 @@ pub mod auth_routes;
 pub mod files_routes;
 pub mod jobs_routes;
 pub mod system_routes;
+pub mod update_routes;
 pub mod ws_routes;
 
 use std::collections::HashMap;
@@ -146,6 +147,9 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/api/files/upload", post(files_routes::upload))
         .route("/api/settings", get(admin_routes::get_settings).put(admin_routes::put_settings))
         .route("/api/audit", get(admin_routes::audit_list))
+        .route("/api/update/status", get(update_routes::status))
+        .route("/api/update/check", post(update_routes::check))
+        .route("/api/update/install", post(update_routes::install))
         .fallback(api_404)
         .with_state(state);
 

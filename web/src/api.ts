@@ -130,6 +130,13 @@ export interface CreateJobRequest {
 
 // ---------- Settings / Audit ----------
 
+export interface UpdateConfigInfo {
+  auto_check: boolean;
+  auto_install: boolean;
+  check_interval_hours: number;
+  repo: string;
+}
+
 export interface Settings {
   data_dir: string;
   workspace_root: string;
@@ -137,6 +144,28 @@ export interface Settings {
   port: number;
   version: string;
   tunnel: TunnelInfo;
+  update: UpdateConfigInfo;
+}
+
+// ---------- Update ----------
+
+/** update.status: idle | checking | downloading | verifying | installing | failed */
+export type UpdateStatusValue =
+  | 'idle'
+  | 'checking'
+  | 'downloading'
+  | 'verifying'
+  | 'installing'
+  | 'failed';
+
+export interface UpdateStatusInfo {
+  current_version: string;
+  available: boolean;
+  latest: { tag: string; version: string; notes_url: string } | null;
+  status: UpdateStatusValue;
+  last_check_at: string | null;
+  error: string | null;
+  settings: UpdateConfigInfo;
 }
 
 export interface AuditEntry {

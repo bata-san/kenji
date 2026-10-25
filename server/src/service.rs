@@ -13,7 +13,7 @@ use windows_service::service_control_handler::{self, ServiceControlHandlerResult
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use windows_service::{define_windows_service, service_dispatcher};
 
-const SERVICE_NAME: &str = "kenji";
+pub const SERVICE_NAME: &str = "kenji";
 const SERVICE_DISPLAY: &str = "Kenji Computing Platform";
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 
@@ -77,8 +77,17 @@ fn run_service_impl() -> Result<()> {
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let server = {
         let data_dir = data_dir.clone();
+        let shutdown_tx = shutdown_tx.clone();
         rt.spawn(async move {
-            crate::run_server(data_dir, None, None, shutdown_rx).await
+            crate::run_server(
+                data_dir,
+                None,
+                None,
+                shutdown_tx,
+                shutdown_rx,
+                crate::update::RestartMode::service(),
+            )
+            .await
         })
     };
 

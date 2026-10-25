@@ -16,6 +16,7 @@ async fn settings_value(state: &SharedState) -> serde_json::Value {
         "port": cfg.port,
         "version": state.version,
         "tunnel": state.tunnel.info(),
+        "update": cfg.update,
     })
 }
 
@@ -30,11 +31,20 @@ pub async fn get_settings(
 #[derive(Deserialize)]
 pub struct UpdateSettingsBody {
     pub tunnel: Option<TunnelUpdate>,
+    pub update: Option<UpdatePrefUpdate>,
 }
 
 #[derive(Deserialize)]
 pub struct TunnelUpdate {
     pub enabled: bool,
+}
+
+#[derive(Deserialize)]
+pub struct UpdatePrefUpdate {
+    pub auto_check: Option<bool>,
+    pub auto_install: Option<bool>,
+    pub check_interval_hours: Option<u32>,
+    pub repo: Option<String>,
 }
 
 pub async fn put_settings(
@@ -61,6 +71,35 @@ pub async fn put_settings(
             "settings_update",
             &format!("tunnel.enabled={}", t.enabled),
         );
+    }
+    if let Some(u) = body.update {
+        let detail = {
+            let mut cfg = state.config.write().unwrap();
+            if let Some(v) = u.auto_check {
+                cfg.update.auto_check = v;
+            }
+            if let Some(v) = u.auto_install {
+                cfg.update.auto_install = v;
+            }
+            if let Some(v) = u.check_interval_hours {
+                cfg.update.check_interval_hours = v;
+            }
+            if let Some(v) = u.repo {
+                if !v.contains('/') {
+                    return Err(ApiError::BadRequest("repo は owner/repo 形式で指定してください".into()));
+                }
+                cfg.update.repo = v;
+            }
+            cfg.save().map_err(ApiError::from)?;
+            format!(
+                "update.auto_check={} auto_install={} interval={}h repo={}",
+                cfg.update.auto_check,
+                cfg.update.auto_install,
+                cfg.update.check_interval_hours,
+                cfg.update.repo
+            )
+        };
+        state.audit.log(&ctx.username, role_str(&ctx.role), "settings_update", &detail);
     }
     Ok(Json(settings_value(&state).await))
 }

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import {
+  ArrowUpCircle,
   Check,
   Copy,
+  Download,
   ExternalLink,
   KeyRound,
   Plus,
@@ -20,6 +22,7 @@ import {
   type KeyInfo,
   type Role,
   type Settings,
+  type UpdateStatusInfo,
 } from '@/api';
 import { Badge, type BadgeProps } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -67,6 +70,15 @@ const TUNNEL_STATUS: Record<string, { label: string; variant: BadgeVariant }> = 
   error: { label: 'エラー', variant: 'danger' },
 };
 
+const UPDATE_STATUS: Record<string, { label: string; variant: BadgeVariant }> = {
+  idle: { label: '待機中', variant: 'secondary' },
+  checking: { label: '確認中', variant: 'warning' },
+  downloading: { label: 'ダウンロード中', variant: 'warning' },
+  verifying: { label: '検証中', variant: 'warning' },
+  installing: { label: '適用中', variant: 'warning' },
+  failed: { label: '失敗', variant: 'danger' },
+};
+
 function InfoRow({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="flex gap-4 px-3.5 py-2.5 text-xs">
@@ -85,6 +97,10 @@ export default function Settings() {
   const [error, setError] = useState<string | null>(null);
   const [tunnelBusy, setTunnelBusy] = useState(false);
   const [keyModalOpen, setKeyModalOpen] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<UpdateStatusInfo | null>(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [prefBusy, setPrefBusy] = useState<string | null>(null);
+  const [restarting, setRestarting] = useState(false);
 
   const loadKeys = useCallback(async (): Promise<void> => {
     try {
@@ -104,12 +120,21 @@ export default function Settings() {
     }
   }, []);
 
+  const loadUpdate = useCallback(async (): Promise<void> => {
+    try {
+      const res = await api<UpdateStatusInfo>('/api/update/status');
+      setUpdateInfo(res);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }, []);
+
   const refreshAll = useCallback(async (): Promise<void> => {
     try {
       const s = await api<Settings>('/api/settings');
       setSettings(s);
       setError(null);
-      await Promise.all([loadKeys(), loadAudit()]);
+      await Promise.all([loadKeys(), loadAudit(), loadUpdate()]);
     } catch (err) {
       if (err instanceof ApiRequestError && err.status === 403) {
         setForbidden(true);
@@ -117,7 +142,7 @@ export default function Settings() {
         setError(errorMessage(err));
       }
     }
-  }, [loadKeys, loadAudit]);
+  }, [loadKeys, loadAudit, loadUpdate]);
 
   useEffect(() => {
     void refreshAll();
@@ -140,6 +165,73 @@ export default function Settings() {
       setError(errorMessage(err));
     } finally {
       setTunnelBusy(false);
+    }
+  }
+
+  async function checkUpdate(): Promise<void> {
+    setUpdateBusy(true);
+    try {
+      const res = await api<UpdateStatusInfo>('/api/update/check', { method: 'POST' });
+      setUpdateInfo(res);
+      setError(null);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setUpdateBusy(false);
+    }
+  }
+
+  async function installUpdate(): Promise<void> {
+    const latest = updateInfo?.latest;
+    if (!updateInfo?.available || !latest || restarting) return;
+    if (!confirm(`v${latest.version} をダウンロードして適用します。完了後、サーバーは自動的に再起動します。`)) return;
+    setUpdateBusy(true);
+    try {
+      await api('/api/update/install', { method: 'POST' });
+      setRestarting(true);
+      void waitForRestart();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setUpdateBusy(false);
+    }
+  }
+
+  async function waitForRestart(): Promise<void> {
+    // 旧プロセス停止 → 新プロセス起動を待ってからリロードする
+    const deadline = Date.now() + 90_000;
+    await new Promise((r) => setTimeout(r, 3000));
+    while (Date.now() < deadline) {
+      try {
+        const res = await fetch('/api/health');
+        if (res.ok) {
+          window.location.reload();
+          return;
+        }
+      } catch {
+        // 再起動中は接続できない → リトライ
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+    setRestarting(false);
+    setError('再起動の完了を確認できませんでした。しばらくしてからページを再読み込みしてください。');
+  }
+
+  async function setUpdatePref(patch: { auto_check?: boolean; auto_install?: boolean }): Promise<void> {
+    setPrefBusy(patch.auto_check != null ? 'auto_check' : 'auto_install');
+    try {
+      const s = await api<Settings>('/api/settings', {
+        method: 'PUT',
+        body: JSON.stringify({ update: patch }),
+      });
+      setSettings(s);
+      const u = await api<UpdateStatusInfo>('/api/update/status');
+      setUpdateInfo(u);
+      setError(null);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setPrefBusy(null);
     }
   }
 
@@ -166,6 +258,7 @@ export default function Settings() {
 
   const tunnelMeta =
     (settings && (TUNNEL_STATUS[settings.tunnel.status] ?? null)) ?? TUNNEL_STATUS.disabled;
+  const updateMeta = UPDATE_STATUS[updateInfo?.status ?? 'idle'] ?? UPDATE_STATUS.idle;
   const sortedAudit = [...audit].sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0));
 
   return (
@@ -188,6 +281,7 @@ export default function Settings() {
           <Tabs defaultValue="server">
             <TabsList>
               <TabsTrigger value="server">サーバー設定</TabsTrigger>
+              <TabsTrigger value="update">アップデート</TabsTrigger>
               <TabsTrigger value="keys">APIキー</TabsTrigger>
               <TabsTrigger value="audit">監査ログ</TabsTrigger>
             </TabsList>
@@ -243,6 +337,109 @@ export default function Settings() {
                   >
                     {settings.tunnel.enabled ? '無効化' : '有効化'}
                   </Button>
+                </div>
+              </Card>
+            </TabsContent>
+
+            <TabsContent value="update" className="mt-3 space-y-3">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <ArrowUpCircle className="h-3.5 w-3.5 text-muted-foreground" />
+                    アップデート
+                  </CardTitle>
+                  <div className="flex gap-2">
+                    <Button variant="secondary" loading={updateBusy} onClick={() => void checkUpdate()}>
+                      <RefreshCw className="h-3.5 w-3.5" />
+                      最新版を確認
+                    </Button>
+                    <Button
+                      disabled={!updateInfo?.available || restarting}
+                      loading={updateBusy}
+                      onClick={() => void installUpdate()}
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                      アップデートを適用
+                    </Button>
+                  </div>
+                </CardHeader>
+                <div className="divide-y divide-zinc-200/60">
+                  <InfoRow label="現在のバージョン">v{updateInfo?.current_version ?? settings.version}</InfoRow>
+                  <InfoRow label="状態">
+                    <Badge variant={updateMeta.variant}>{updateMeta.label}</Badge>
+                  </InfoRow>
+                  <InfoRow label="最新バージョン">
+                    {updateInfo?.latest ? (
+                      <span className="inline-flex items-center gap-1.5">
+                        <a
+                          href={updateInfo.latest.notes_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-blue-600 hover:underline"
+                        >
+                          v{updateInfo.latest.version}
+                        </a>
+                        {updateInfo.available ? (
+                          <Badge variant="success">更新あり</Badge>
+                        ) : (
+                          <span className="text-muted-foreground">最新状態です</span>
+                        )}
+                      </span>
+                    ) : (
+                      <span className="text-muted-foreground">未確認</span>
+                    )}
+                  </InfoRow>
+                  <InfoRow label="最終確認">{formatDateTime(updateInfo?.last_check_at)}</InfoRow>
+                  <InfoRow label="配布元">{updateInfo?.settings.repo ?? settings.update.repo}</InfoRow>
+                  {updateInfo?.error && (
+                    <InfoRow label="エラー">
+                      <span className="text-red-600">{updateInfo.error}</span>
+                    </InfoRow>
+                  )}
+                </div>
+                {restarting && (
+                  <div className="flex items-center gap-2 border-t border-zinc-200/60 px-3.5 py-3 text-xs text-muted-foreground">
+                    <Spinner />
+                    サーバーを再起動しています。完了後に自動的にページを再読み込みします…
+                  </div>
+                )}
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle>アップデート設定</CardTitle>
+                </CardHeader>
+                <div className="divide-y divide-zinc-200/60">
+                  <div className="flex items-center justify-between gap-4 px-3.5 py-3">
+                    <div className="min-w-0">
+                      <p className="text-xs font-medium text-zinc-700">自動確認</p>
+                      <p className="mt-0.5 text-[11px] text-muted-foreground">
+                        {settings.update.check_interval_hours}時間ごとに配布元の新バージョンを確認します
+                      </p>
+                    </div>
+                    <Button
+                      variant={settings.update.auto_check ? 'destructive' : 'default'}
+                      loading={prefBusy === 'auto_check'}
+                      onClick={() => void setUpdatePref({ auto_check: !settings.update.auto_check })}
+                    >
+                      {settings.update.auto_check ? '無効化' : '有効化'}
+                    </Button>
+                  </div>
+                  <div className="flex items-center justify-between gap-4 px-3.5 py-3">
+                    <div className="min-w-0">
+                      <p className="text-xs font-medium text-zinc-700">自動インストール</p>
+                      <p className="mt-0.5 text-[11px] text-muted-foreground">
+                        新バージョン検出時にSHA256検証・適用・再起動まで自動で行います
+                      </p>
+                    </div>
+                    <Button
+                      variant={settings.update.auto_install ? 'destructive' : 'default'}
+                      loading={prefBusy === 'auto_install'}
+                      onClick={() => void setUpdatePref({ auto_install: !settings.update.auto_install })}
+                    >
+                      {settings.update.auto_install ? '無効化' : '有効化'}
+                    </Button>
+                  </div>
                 </div>
               </Card>
             </TabsContent>

@@ -47,7 +47,7 @@ Windows PC を、インターネット経由で自由に使える小規模プラ
 │   ├─ /api/terminal    ConPTY ↔ WebSocket (PowerShell)                │
 │   ├─ /api/files/*     ワークスペース内ファイル操作                    │
 │   ├─ /api/system/*    CPU/GPU/メモリ/ディスク監視                     │
-│   ├─ /api/settings, /api/audit, /api/health                          │
+│   ├─ /api/settings, /api/audit, /api/update/*, /api/health             │
 │  組み込みWeb UI (React 静的アセットをバイナリに埋め込み)               │
 │                                                                      │
 │  ジョブマネージャ ── 子プロセス(任意コマンド) ── ログ収集・ローテーション │
@@ -99,7 +99,8 @@ C:\ProgramData\kenji\
 ├── jobs.json        # ジョブ定義（停止状態でも永続）
 ├── workspace\       # ファイルAPI・ジョブcwd のサンドボックスルート
 ├── logs\<jobid>.log # ジョブログ（5MBローテーション、.1を1世代保持）
-└── audit\audit.jsonl # 監査ログ（10MBローテーション）
+├── audit\audit.jsonl # 監査ログ（10MBローテーション）
+└── updates\          # アップデートステージング（kenji.exe.new・finalize.log）
 ```
 
 ## 5. 技術選定
@@ -116,7 +117,7 @@ C:\ProgramData\kenji\
 
 ## 6. ロードマップ
 
-- **MVP（本次実装）**: 認証/RBAC/監査、ジョブ実行・管理・再実行・ログ(WSライブテール)・cronスケジュール・再起動ポリシー、PowerShellターミナル、ファイルAPI、メトリクス(CPU/GPU/メモリ/ディスク)、Web UI、Windows Service、cloudflared管理（Quick Tunnel）、セットアップCLI
+- **MVP（本次実装）**: 認証/RBAC/監査、ジョブ実行・管理・再実行・ログ(WSライブテール)・cronスケジュール・再起動ポリシー、PowerShellターミナル、ファイルAPI、メトリクス(CPU/GPU/メモリ/ディスク)、Web UI、Windows Service、cloudflared管理（Quick Tunnel）、MCPサーバー、自動アップデート（GitHub Releases・SHA256検証）、セットアップCLI
 - **Phase 2**: Job Objectによるメモリ/CPUレート制限、フォルダzipダウンロード、名前付きトンネル（独自ドメイン）、複数パブリックエンドポイント公開、APIクライアントCLI、バックアップ/リストア
 - **Phase 3**: マルチノード（中央管理サーバー＋エージェント）、コンテナ統合UI、リソース割当クォータ、Cloudflare Access連携
 
@@ -126,3 +127,20 @@ C:\ProgramData\kenji\
 - cron は5フィールド標準形式、実行中の多重起動はスキップ（catch-upなし）
 - リソース「制限」はプロセス停止まで（Job Object制限はPhase 2）
 - トンネルは Quick Tunnel（アカウント不要・即時）。名前付きトンネルはドキュメントで案内
+
+## 8. 自動アップデート
+
+GitHub Releases を配布元とするセルフアップデート。リリースには
+`kenji-windows-amd64.exe` と `.sha256` チェックサムアセットが必須で、
+**チェックサムが一致しないリリースは一切適用しない**（.github/workflows/release.yml が両アセットを生成）。
+
+フロー: `GET releases/latest` → semver比較 → ダウンロード（128MB上限）→ SHA256検証 →
+実行中バイナリを `*.old` にリネーム（Windowsでは実行中exeのリネームは可能）し新バイナリを設置 →
+graceful shutdown → デタッチした `kenji update-finalize` ヘルパーが旧プロセス停止を確認してから、
+サービスモードならSCM経由で、フォアグラウンドなら同一引数で新バイナリを再起動。
+
+- 設計判断: 更新確認はデフォルトON（24時間毎）、**適用は手動（admin API/UI）がデフォルト**。
+  `auto_install` をONにすると検出→検証→適用→再起動まで完全自動。
+- install API は admin 権限 + 監査ログ必須。ダウンロードは `updates\kenji.exe.new` にステージし、
+  失敗時は稼働中インスタンスに影響なし。
+- `KENJI_UPDATE_API` 環境変数でGitHub API互換のエンドポイントを差し替え可能（テスト用）。

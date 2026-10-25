@@ -146,19 +146,53 @@ Job オブジェクト:
 ```json
 {"data_dir":"C:\\ProgramData\\kenji","workspace_root":"C:\\ProgramData\\kenji\\workspace",
  "bind":"127.0.0.1","port":8787,"version":"0.1.0",
- "tunnel":{"available":true,"enabled":false,"url":null,"status":"disabled"}}
+ "tunnel":{"available":true,"enabled":false,"url":null,"status":"disabled"},
+ "update":{"auto_check":true,"auto_install":false,"check_interval_hours":24,"repo":"bata-san/kenji"}}
 ```
 tunnel.status: `disabled` | `starting` | `running` | `stopped` | `unavailable` | `error`
 
 ### PUT /api/settings  (admin)  — 部分更新
 ```json
-リクエスト: {"tunnel":{"enabled":true}}
+リクエスト: {"tunnel":{"enabled":true}, "update":{"auto_check":false,"auto_install":true,"check_interval_hours":12,"repo":"owner/repo"}}
 → 200: GET /api/settings と同じ形式
 ```
+`update` フィールドはすべて省略可能（部分更新）。`repo` は `owner/repo` 形式必須。
 
 ### GET /api/audit?limit=200  (admin)
 → `{"entries":[{"ts":"...","user":"admin","role":"admin","action":"job_start","detail":"train"}]}`
-（新しい順。action: login / login_failed / job_create / job_start / job_stop / job_delete / file_mkdir / file_move / file_delete / file_upload / file_download / key_create / key_delete / settings_update / terminal_open）
+（新しい順。action: login / login_failed / job_create / job_start / job_stop / job_delete / file_mkdir / file_move / file_delete / file_upload / file_download / key_create / key_delete / settings_update / update_check / update_install / terminal_open）
+
+---
+
+## Update（自動アップデート — GitHub Releases 配信）
+
+配布元リリースには `kenji-windows-amd64.exe` と `kenji-windows-amd64.exe.sha256` の2アセットが必須。
+チェックサムなし、またはSHA256不一致のリリースは**適用されない**。
+
+### GET /api/update/status  (admin)
+```json
+{"current_version":"0.1.0","available":true,
+ "latest":{"tag":"v0.2.0","version":"0.2.0","notes_url":"https://github.com/bata-san/kenji/releases/tag/v0.2.0"},
+ "status":"idle","last_check_at":"2026-10-25T09:00:00Z","error":null,
+ "settings":{"auto_check":true,"auto_install":false,"check_interval_hours":24,"repo":"bata-san/kenji"}}
+```
+status: `idle` | `checking` | `downloading` | `verifying` | `installing` | `failed`。
+`available` は最新リリースが稼働中バージョンより新しい場合のみ `true`。
+
+### POST /api/update/check  (admin)
+GitHub Releases の最新版を確認する（ダウンロードは行わない）。
+→ 200: GET /api/update/status と同じ形式（確認エラーは `error` フィールドで返る）
+
+### POST /api/update/install  (admin)
+最新版をダウンロード → SHA256検証 → バイナリ適用 → サーバー自動再起動。
+ダウンロード・検証に失敗した場合は400で適用を拒否（稼働中インスタンスは継続稼働）。
+→ 200 `{"restarting":true}`
+
+適用フロー: 実行中バイナリを `*.old` に退避し新バイナリを設置 → graceful shutdown →
+デタッチした `kenji update-finalize` ヘルパーが旧プロセス停止を確認後、
+サービスモードならSCM経由で、フォアグラウンドなら同一引数で再起動する。
+`auto_check` 有効時は `check_interval_hours` 時間ごとに自動確認し、
+`auto_install` 有効なら検証・適用・再起動まで自動で行う。
 
 ---
 

@@ -1,0 +1,52 @@
+name: Release
+
+# タグ v* のプッシュで起動。Web UI → サーバー(release)の順にビルドし、
+# kenji-windows-amd64.exe と .sha256 をGitHub Releasesに公開する。
+# 自動アップデート（server/src/update.rs）はこの2アセットを検索する。
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # rust-embed が ../web/dist をビルド時に埋め込むため、先にWeb UIをビルドする
+      - name: Build web UI
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build server (release)
+        working-directory: server
+        run: cargo build --release
+
+      - name: Stage release assets
+        shell: pwsh
+        working-directory: server
+        run: |
+          # ワークスペースルートがリポジリ直下のため target/ はルート直下に生成される
+          Copy-Item ../target/release/kenji.exe kenji-windows-amd64.exe
+          $sha = (Get-FileHash -Algorithm SHA256 kenji-windows-amd64.exe).Hash.ToLower()
+          "$sha  kenji-windows-amd64.exe" | Out-File -Encoding ascii kenji-windows-amd64.exe.sha256
+          Get-FileHash -Algorithm SHA256 kenji-windows-amd64.exe | Format-List
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            server/kenji-windows-amd64.exe
+            server/kenji-windows-amd64.exe.sha256
