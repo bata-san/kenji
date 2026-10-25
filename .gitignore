@@ -1,0 +1,9 @@
+/target
+node_modules/
+.data/
+.data-smoke/
+.data-mcp-smoke/
+*.log
+*.tmp
+.DS_Store
+web/dist/preview.html

@@ -1,0 +1,282 @@
+// Kenji Web API クライアント & 共有型定義 (docs/api.md 準拠)
+
+export const TOKEN_KEY = 'kenji_token';
+
+// ---------- 共通型 ----------
+
+export type Role = 'viewer' | 'operator' | 'admin';
+export type JobStatus = 'running' | 'stopped' | 'failed' | 'stopping';
+export type RestartPolicy = 'never' | 'on_failure' | 'always';
+export type FileKind = 'file' | 'dir';
+
+export interface ApiErrorBody {
+  error: { code: string; message: string };
+}
+
+// ---------- Auth ----------
+
+export interface LoginResponse {
+  token: string;
+  username: string;
+  role: Role;
+  expires_at: string;
+}
+
+export interface Me {
+  username: string;
+  role: Role;
+}
+
+export interface KeyInfo {
+  id: string;
+  name: string;
+  role: Role;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+/** POST /api/auth/keys の応答（key はこの時だけ返る） */
+export interface CreatedKey extends KeyInfo {
+  key: string;
+}
+
+// ---------- System ----------
+
+export interface CpuInfo {
+  cores: number;
+  usage_percent: number;
+}
+
+export interface MemoryInfo {
+  total_bytes: number;
+  used_bytes: number;
+}
+
+export interface DiskInfo {
+  label: string;
+  mount_point: string;
+  total_bytes: number;
+  available_bytes: number;
+}
+
+export interface GpuInfo {
+  name: string;
+  utilization_percent: number;
+  memory_total_bytes: number;
+  memory_used_bytes: number;
+}
+
+export interface JobsSummary {
+  running: number;
+  total: number;
+  failed: number;
+}
+
+/** tunnel.status: disabled | starting | running | stopped | unavailable | error */
+export interface TunnelInfo {
+  available: boolean;
+  enabled: boolean;
+  url: string | null;
+  status: string;
+}
+
+export interface Overview {
+  hostname: string;
+  os: string;
+  version: string;
+  uptime_secs: number;
+  cpu: CpuInfo;
+  memory: MemoryInfo;
+  disks: DiskInfo[];
+  gpus: GpuInfo[];
+  jobs_summary: JobsSummary;
+  tunnel: TunnelInfo;
+}
+
+// ---------- Jobs ----------
+
+export interface Job {
+  id: string;
+  name: string;
+  description: string | null;
+  command: string;
+  args: string[];
+  cwd: string | null;
+  env: Record<string, string> | null;
+  restart_policy: RestartPolicy;
+  schedule: string | null;
+  tags: string[];
+  status: JobStatus;
+  pid: number | null;
+  exit_code: number | null;
+  last_error: string | null;
+  started_at: string | null;
+  stopped_at: string | null;
+  created_at: string;
+  schedule_next_at: string | null;
+}
+
+export interface CreateJobRequest {
+  name: string;
+  command: string;
+  args: string[];
+  cwd: string | null;
+  env: Record<string, string>;
+  restart_policy: RestartPolicy;
+  schedule: string | null;
+  tags: string[];
+  description: string;
+}
+
+// ---------- Settings / Audit ----------
+
+export interface Settings {
+  data_dir: string;
+  workspace_root: string;
+  bind: string;
+  port: number;
+  version: string;
+  tunnel: TunnelInfo;
+}
+
+export interface AuditEntry {
+  ts: string;
+  user: string;
+  role: Role;
+  action: string;
+  detail: string | null;
+}
+
+// ---------- Files ----------
+
+export interface FileEntry {
+  name: string;
+  kind: FileKind;
+  size: number | null;
+  modified: string | null;
+}
+
+export interface FileList {
+  path: string;
+  entries: FileEntry[];
+}
+
+// ---------- トークン ----------
+
+export function getToken(): string | null {
+  return localStorage.getItem(TOKEN_KEY);
+}
+
+export function setToken(token: string): void {
+  localStorage.setItem(TOKEN_KEY, token);
+}
+
+export function clearToken(): void {
+  localStorage.removeItem(TOKEN_KEY);
+}
+
+// ---------- API エラー ----------
+
+export class ApiRequestError extends Error {
+  readonly status: number;
+  readonly code: string;
+
+  constructor(status: number, code: string, message: string) {
+    super(message);
+    this.name = 'ApiRequestError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
+export function errorMessage(err: unknown): string {
+  if (err instanceof ApiRequestError) return err.message;
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
+
+// ---------- fetch ラッパー ----------
+
+/**
+ * Authorization ヘッダーを付与して JSON API を呼ぶ。
+ * 401 の場合はトークンを破棄して /login へリダイレクトする。
+ * エラーボディ {"error":{"code","message"}} の message を例外で返す。
+ */
+export async function api<T = unknown>(path: string, init?: RequestInit): Promise<T> {
+  const token = getToken();
+  const headers = new Headers(init?.headers);
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  if (init?.body != null && !(init.body instanceof FormData) && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+
+  const res = await fetch(path, { ...init, headers });
+
+  if (!res.ok) {
+    let code = `http_${res.status}`;
+    let message = `リクエストに失敗しました (HTTP ${res.status})`;
+    try {
+      const text = await res.text();
+      if (text) {
+        const body = JSON.parse(text) as Partial<ApiErrorBody>;
+        if (body.error) {
+          code = body.error.code;
+          message = body.error.message;
+        }
+      }
+    } catch {
+      // JSON 以外のボディは無視
+    }
+    if (res.status === 401) {
+      clearToken();
+      if (window.location.pathname !== '/login') {
+        window.location.assign('/login');
+      }
+    }
+    throw new ApiRequestError(res.status, code, message);
+  }
+
+  const text = await res.text();
+  if (!text) return undefined as T;
+  return JSON.parse(text) as T;
+}
+
+// ---------- WebSocket ----------
+
+/** 開発時は Vite プロキシ経由（location.host を使用。絶対に 127.0.0.1:8787 を直書きしない） */
+export function wsUrl(path: string): string {
+  const token = getToken() ?? '';
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${proto}//${window.location.host}${path}?token=${encodeURIComponent(token)}`;
+}
+
+// ---------- フォーマット ----------
+
+export function formatBytes(bytes: number | null | undefined): string {
+  if (bytes == null) return '-';
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KB', 'MB', 'GB', 'TB', 'PB'];
+  let value = bytes;
+  let i = -1;
+  do {
+    value /= 1024;
+    i += 1;
+  } while (value >= 1024 && i < units.length - 1);
+  return `${value.toFixed(1)} ${units[i]}`;
+}
+
+export function formatDateTime(iso: string | null | undefined): string {
+  if (!iso) return '-';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '-';
+  return d.toLocaleString('ja-JP', { hour12: false });
+}
+
+export function formatUptime(secs: number): string {
+  const d = Math.floor(secs / 86400);
+  const h = Math.floor((secs % 86400) / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  if (d > 0) return `${d}日 ${h}時間`;
+  if (h > 0) return `${h}時間 ${m}分`;
+  return `${m}分`;
+}

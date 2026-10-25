@@ -1,0 +1,60 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* ライトテーマのみ（ダークモードなし） */
+  :root {
+    --background: 0 0% 98%;            /* zinc-50 */
+    --foreground: 240 6% 10%;          /* zinc-900 */
+    --card: 0 0% 100%;                /* white */
+    --card-foreground: 240 6% 10%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 240 6% 10%;
+    --primary: 221 83% 53%;           /* blue-600 */
+    --primary-foreground: 0 0% 100%;
+    --secondary: 240 5% 96%;          /* zinc-100 */
+    --secondary-foreground: 240 5% 34%; /* zinc-600 */
+    --muted: 240 5% 96%;
+    --muted-foreground: 240 4% 46%;   /* zinc-500 */
+    --accent: 240 5% 96%;
+    --accent-foreground: 240 6% 10%;
+    --destructive: 0 72% 51%;         /* red-600 */
+    --destructive-foreground: 0 0% 100%;
+    --border: 240 6% 90%;             /* zinc-200 */
+    --input: 240 6% 90%;
+    --ring: 217 91% 60%;              /* blue-500 */
+    --radius: 0.5rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-background font-sans text-foreground antialiased;
+  font-size: 13px;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  border-radius: 5px;
+  background: #d4d4d8;
+  border: 2px solid #fafafa;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #a1a1aa;
+}

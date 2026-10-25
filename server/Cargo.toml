@@ -1,0 +1,42 @@
+[package]
+name = "kenji"
+version = "0.1.0"
+edition = "2021"
+description = "Kenji: generic remote computing platform for Windows PCs"
+license = "MIT"
+
+[dependencies]
+axum = { version = "0.8", features = ["ws", "multipart"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+thiserror = "2"
+jsonwebtoken = "9"
+argon2 = "0.5"
+rand = "0.8"
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+sysinfo = "0.30"
+portable-pty = "0.8"
+rust-embed = "8"
+mime_guess = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures-util = "0.3"
+tokio-util = { version = "0.7", features = ["io"] }
+cron = "0.12"
+rpassword = "7"
+percent-encoding = "2"
+walkdir = "2"
+nvml-wrapper = "0.10"
+ureq = { version = "2", features = ["json"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"
+
+[dev-dependencies]
+tempfile = "3"
