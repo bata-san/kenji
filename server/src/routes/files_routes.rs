@@ -1,5 +1,16 @@
 use std::path::PathBuf;
 
+const MAX_UPLOAD_FILE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_UPLOAD_REQUEST_BYTES: u64 = 512 * 1024 * 1024;
+// Drop cleanup also runs when the request future is cancelled.
+struct UploadTemp(PathBuf);
+
+impl Drop for UploadTemp {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 use axum::body::Body;
 use axum::extract::{Multipart, Query, State};
 use axum::http::{header, HeaderMap};
@@ -25,7 +36,7 @@ fn workspace_root(state: &SharedState) -> PathBuf {
 }
 
 fn normalize(rel: &str) -> String {
-    let t = rel.trim().trim_start_matches('/');
+    let t = rel.trim_start_matches('/');
     let t = t.replace('\\', "/");
     if t.is_empty() {
         "/".to_string()
@@ -107,6 +118,8 @@ pub async fn mkdir(
 ) -> ApiResult<Json<serde_json::Value>> {
     ctx.require(Role::Operator)?;
     let (dir, norm) = resolve_checked(&state, &body.path)?;
+    files::ensure_within(&workspace_root(&state), &dir)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(ApiError::from)?;
@@ -132,13 +145,11 @@ pub async fn r#move(
     ctx.require(Role::Operator)?;
     let (from, from_norm) = resolve_checked(&state, &body.from)?;
     let (to, to_norm) = resolve_checked(&state, &body.to)?;
-    files::safe_file_name(
-        normalize(&body.to)
-            .trim_start_matches('/')
-            .rsplit('/')
-            .next()
-            .unwrap_or(""),
-    )?;
+    let root = workspace_root(&state);
+    let from = files::ensure_within(&root, &from).map_err(|_| ApiError::NotFound)?;
+    let to = files::ensure_within(&root, &to).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    files::ensure_not_root(&root, &from).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    files::ensure_not_root(&root, &to).map_err(|e| ApiError::BadRequest(e.to_string()))?;
     tokio::fs::rename(&from, &to)
         .await
         .map_err(ApiError::from)?;
@@ -160,11 +171,9 @@ pub async fn delete(
 ) -> ApiResult<Json<serde_json::Value>> {
     ctx.require(Role::Operator)?;
     let (p, norm) = resolve_checked(&state, q.path.as_deref().unwrap_or("/"))?;
-    if p == workspace_root(&state) {
-        return Err(ApiError::BadRequest(
-            "ワークスペースルートは削除できません".into(),
-        ));
-    }
+    let root = workspace_root(&state);
+    let p = files::ensure_within(&root, &p).map_err(|_| ApiError::NotFound)?;
+    files::ensure_not_root(&root, &p).map_err(|e| ApiError::BadRequest(e.to_string()))?;
     let meta = tokio::fs::metadata(&p)
         .await
         .map_err(|_| ApiError::NotFound)?;
@@ -264,10 +273,12 @@ pub async fn upload(
     ctx.require(Role::Operator)?;
     let (dir, norm) = resolve_checked(&state, q.path.as_deref().unwrap_or("/"))?;
     let root = workspace_root(&state);
-    files::ensure_within(&root, &dir).map_err(|_| ApiError::NotFound)?;
+    let dir = files::ensure_within(&root, &dir).map_err(|e| ApiError::BadRequest(e.to_string()))?;
     let _ = norm;
 
     let mut saved: Vec<serde_json::Value> = Vec::new();
+    let mut total_size = 0u64;
+    let mut file_count = 0usize;
     while let Some(mut field) = multipart
         .next_field()
         .await
@@ -276,22 +287,79 @@ pub async fn upload(
         if field.name() != Some("file") {
             continue;
         }
+        file_count += 1;
+        if file_count > 32 {
+            return Err(ApiError::BadRequest(
+                "一度にアップロードできるファイルは32個までです".into(),
+            ));
+        }
         let orig = field.file_name().unwrap_or("upload.bin").to_string();
         let safe = files::safe_file_name(&orig).map_err(|e| ApiError::BadRequest(e.to_string()))?;
         let dest = dir.join(&safe);
-        let mut f = tokio::fs::File::create(&dest)
-            .await
-            .map_err(ApiError::from)?;
-        let mut size: u64 = 0;
-        while let Some(chunk) = field
-            .chunk()
-            .await
-            .map_err(|e| ApiError::BadRequest(format!("upload error: {e}")))?
-        {
-            f.write_all(&chunk).await.map_err(ApiError::from)?;
-            size += chunk.len() as u64;
+        // Never follow a pre-existing symlink or overwrite a directory.
+        match tokio::fs::symlink_metadata(&dest).await {
+            Ok(meta) if meta.file_type().is_symlink() || meta.is_dir() => {
+                return Err(ApiError::BadRequest(
+                    "アップロード先が通常ファイルではありません".into(),
+                ));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(ApiError::from(e)),
         }
-        f.flush().await.map_err(ApiError::from)?;
+        let temp = dir.join(format!(".kenji-upload-{}.tmp", uuid::Uuid::new_v4()));
+        // Create synchronously so cancellation cannot occur between creation and
+        // installing the cleanup guard. The actual upload writes stay async.
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(ApiError::from)?;
+        let _cleanup = UploadTemp(temp.clone());
+        let mut f = tokio::fs::File::from_std(file);
+        let upload_result: ApiResult<u64> = async {
+            let mut size = 0u64;
+            while let Some(chunk) = field
+                .chunk()
+                .await
+                .map_err(|e| ApiError::BadRequest(format!("upload error: {e}")))?
+            {
+                size = size
+                    .checked_add(chunk.len() as u64)
+                    .ok_or_else(|| ApiError::BadRequest("アップロードサイズ超過".into()))?;
+                if size > MAX_UPLOAD_FILE_BYTES
+                    || total_size.saturating_add(size) > MAX_UPLOAD_REQUEST_BYTES
+                {
+                    return Err(ApiError::BadRequest(
+                        "アップロードサイズ上限を超えました".into(),
+                    ));
+                }
+                f.write_all(&chunk).await.map_err(ApiError::from)?;
+            }
+            f.flush().await.map_err(ApiError::from)?;
+            f.sync_all().await.map_err(ApiError::from)?;
+            Ok(size)
+        }
+        .await;
+        drop(f);
+        let size = upload_result?;
+        // Recheck parents and destination, but path-based checks cannot eliminate
+        // concurrent parent/junction swaps (see files::ensure_within).
+        files::ensure_within(&root, &dir).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        match tokio::fs::symlink_metadata(&dest).await {
+            Ok(meta) if meta.file_type().is_symlink() || meta.is_dir() => {
+                return Err(ApiError::BadRequest(
+                    "アップロード先が通常ファイルではありません".into(),
+                ));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(ApiError::from(e)),
+        }
+        // Same-directory rename atomically replaces files on Windows too
+        // (MoveFileExW with REPLACE_EXISTING); never move the old file aside.
+        std::fs::rename(&temp, &dest).map_err(ApiError::from)?;
+        total_size = total_size.saturating_add(size);
         saved.push(serde_json::json!({ "name": safe, "size": size }));
     }
     state.audit.log(
@@ -305,4 +373,29 @@ pub async fn upload(
         ),
     );
     Ok(Json(serde_json::json!({ "ok": true, "saved": saved })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upload_temp_cleanup_and_atomic_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp = dir.path().join("upload.tmp");
+        let dest = dir.path().join("existing.txt");
+        std::fs::write(&dest, "old").unwrap();
+        {
+            std::fs::write(&temp, "cancelled").unwrap();
+            let _cleanup = UploadTemp(temp.clone());
+        }
+        assert!(!temp.exists());
+        {
+            std::fs::write(&temp, "new").unwrap();
+            let _cleanup = UploadTemp(temp.clone());
+            std::fs::rename(&temp, &dest).unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "new");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
 }

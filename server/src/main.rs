@@ -7,6 +7,8 @@ mod jobs;
 mod mcp;
 mod metrics;
 mod pty;
+mod repair;
+mod resources;
 mod routes;
 #[cfg(windows)]
 mod service;
@@ -85,6 +87,20 @@ enum Cmd {
         /// APIキーまたはJWT
         #[arg(long)]
         token: String,
+    },
+    /// 独立したAI診断ジョブ（内部利用）
+    #[command(hide = true)]
+    RepairRun {
+        #[arg(long)]
+        data_dir: PathBuf,
+    },
+    /// 独立したクラッシュ監視プロセス（内部利用）
+    #[command(hide = true)]
+    RepairWatch {
+        #[arg(long)]
+        pid: u32,
+        #[arg(long)]
+        data_dir: PathBuf,
     },
     /// アップデート適用後の再起動ヘルパー（内部利用・手動実行しない）
     #[command(hide = true)]
@@ -172,6 +188,26 @@ fn main() {
             1
         }
         Cmd::Mcp { url, token } => mcp::run(url, token),
+        Cmd::RepairRun { data_dir } => match Config::load(&data_dir).and_then(|cfg| {
+            repair::run(
+                &data_dir,
+                &cfg.repair,
+                "Operator requested a manual diagnostic check. No crash details supplied.",
+            )
+        }) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("AI診断: {e:#}");
+                1
+            }
+        },
+        Cmd::RepairWatch { pid, data_dir } => match repair::watch(pid, data_dir) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("修復監視: {e:#}");
+                1
+            }
+        },
         Cmd::UpdateFinalize {
             data_dir,
             wait_pid,
@@ -323,8 +359,30 @@ pub async fn run_server(
             return 1;
         }
     };
+    let resources = match resources::ResourceGuard::new() {
+        Ok(guard) => Arc::new(guard),
+        Err(e) => {
+            tracing::error!("リソース保護初期化失敗: {e:#}");
+            return 1;
+        }
+    };
+    if let Err(e) = resources.set_enabled(cfg.desktop_priority) {
+        tracing::error!("リソース保護設定失敗: {e:#}");
+        return 1;
+    }
+    if let Err(e) = repair::start_observer(&data_dir) {
+        tracing::error!("クラッシュ監視起動失敗: {e:#}");
+        if cfg.repair.enabled {
+            return 1;
+        }
+    }
     let audit = Arc::new(Audit::new(&data_dir.join("audit")));
-    let jobs = JobManager::new(&data_dir, cfg.workspace_root.clone(), audit.clone());
+    let jobs = JobManager::new(
+        &data_dir,
+        cfg.workspace_root.clone(),
+        audit.clone(),
+        resources,
+    );
     if let Err(e) = jobs.load() {
         // リモート運用で起動不能になるのを避けるため、破損ファイルを退避して空で起動する
         eprintln!("警告: ジョブ定義の読み込みに失敗: {e:#}（jobs.json を退避して空で起動します）");
@@ -473,16 +531,23 @@ pub async fn run_server(
             }
         }
     });
-    if let Err(e) = serve.await {
+    let failed = if let Err(e) = serve.await {
         eprintln!("サーバーエラー: {e}");
-    }
+        true
+    } else {
+        false
+    };
     // Graceful cleanup: managed children and the tunnel die with the server.
     state.jobs.stop_all();
     state.tunnel.stop();
     // Give spawned taskkill commands a moment to complete before exit.
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     println!("停止しました。");
-    0
+    if failed {
+        1
+    } else {
+        0
+    }
 }
 
 fn do_setup(

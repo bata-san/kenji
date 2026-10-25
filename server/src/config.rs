@@ -11,6 +11,30 @@ pub struct TerminalConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TunnelConfig {
     pub enabled: bool,
+    /// トンネル実装の選択。URL は起動のたびに動的に取得され、
+    /// 固定ドメインを前提にしない（ランダムURL運用を本番でも通るようにする）。
+    #[serde(default)]
+    pub provider: TunnelProvider,
+}
+
+/// トンネル実装の選択。`auto` は cloudflared → ngrok の順で利用可能なものを使う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TunnelProvider {
+    #[default]
+    Auto,
+    Cloudflared,
+    Ngrok,
+}
+
+impl std::fmt::Display for TunnelProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            TunnelProvider::Auto => "auto",
+            TunnelProvider::Cloudflared => "cloudflared",
+            TunnelProvider::Ngrok => "ngrok",
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +70,10 @@ pub struct Config {
     pub tunnel: TunnelConfig,
     #[serde(default)]
     pub update: UpdateConfig,
+    #[serde(default)]
+    pub desktop_priority: bool,
+    #[serde(default)]
+    pub repair: crate::repair::RepairConfig,
 }
 
 impl Config {
@@ -73,8 +101,12 @@ impl Config {
         let p = Config::path(&self.data_dir);
         let raw = serde_json::to_string_pretty(self)?;
         let tmp = p.with_extension("json.tmp");
-        std::fs::write(&tmp, raw.as_bytes())?;
-        // atomic-ish replace
+        use std::io::Write;
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(raw.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        // Replace only after the complete file has reached disk.
         std::fs::rename(&tmp, &p)?;
         Ok(())
     }
@@ -89,8 +121,13 @@ impl Config {
                 shell: "powershell.exe".into(),
                 args: vec!["-NoLogo".into(), "-NoProfile".into()],
             },
-            tunnel: TunnelConfig { enabled: false },
+            tunnel: TunnelConfig {
+                enabled: false,
+                provider: TunnelProvider::Auto,
+            },
             update: UpdateConfig::default(),
+            desktop_priority: false,
+            repair: crate::repair::RepairConfig::default(),
         }
     }
 }

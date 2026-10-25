@@ -64,11 +64,52 @@ pub struct AuthContext {
 
 #[derive(Default)]
 struct Lockout {
-    fails: HashMap<String, (u32, Option<Instant>)>,
+    fails: HashMap<String, LockoutEntry>,
+}
+
+struct LockoutEntry {
+    fails: u32,
+    until: Option<Instant>,
+    last_seen: Instant,
+}
+
+impl Lockout {
+    fn prune(&mut self, now: Instant) {
+        self.fails.retain(|_, entry| {
+            now.duration_since(entry.last_seen).as_secs() < LOCKOUT_ENTRY_TTL_SECS
+        });
+    }
+
+    fn record_failure(&mut self, who: &str, now: Instant) {
+        self.prune(now);
+        if self.fails.len() >= MAX_LOCKOUT_ENTRIES && !self.fails.contains_key(who) {
+            if let Some(oldest) = self
+                .fails
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_seen)
+                .map(|(key, _)| key.clone())
+            {
+                self.fails.remove(&oldest);
+            }
+        }
+        let entry = self.fails.entry(who.to_owned()).or_insert(LockoutEntry {
+            fails: 0,
+            until: None,
+            last_seen: now,
+        });
+        entry.last_seen = now;
+        entry.fails += 1;
+        if entry.fails >= MAX_FAILS {
+            entry.until = Some(now + std::time::Duration::from_secs(LOCKOUT_SECS));
+            entry.fails = 0;
+        }
+    }
 }
 
 const MAX_FAILS: u32 = 5;
 const LOCKOUT_SECS: u64 = 60;
+const LOCKOUT_ENTRY_TTL_SECS: u64 = 10 * 60;
+const MAX_LOCKOUT_ENTRIES: usize = 10_000;
 
 pub struct AuthStore {
     path: PathBuf,
@@ -123,30 +164,37 @@ impl AuthStore {
     }
 
     /// Verify admin credentials. Returns auth context on success.
-    /// `who` is an identifier for lockout tracking (username + client ip).
+    /// `who` is a bounded identifier for lockout tracking (the client IP).
     pub fn login(&self, username: &str, password: &str, who: &str) -> Result<Option<AuthContext>> {
+        if username.len() > 256 || password.len() > 1024 || who.len() > 256 {
+            return Ok(None);
+        }
         {
-            let l = self.lockouts.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((_, Some(until))) = l.fails.get(who) {
-                if Instant::now() < *until {
-                    return Ok(None); // still locked out
+            let mut l = self.lockouts.lock().unwrap_or_else(|e| e.into_inner());
+            let now = Instant::now();
+            l.prune(now);
+            if let Some(entry) = l.fails.get_mut(who) {
+                if entry.until.is_some_and(|until| now < until) {
+                    entry.last_seen = now;
+                    return Ok(None);
                 }
             }
         }
 
-        let (user_ok, pass_ok) = {
+        // Snapshot credentials only; expensive Argon2 must not hold the data lock.
+        let (admin_username, password_hash) = {
             let data = self.data.lock().unwrap_or_else(|e| e.into_inner());
-            let user_ok = data.admin_username == username;
-            let parsed = PasswordHash::new(&data.admin_password_hash).ok();
-            let pass_ok = parsed
-                .map(|h| {
-                    Argon2::default()
-                        .verify_password(password.as_bytes(), &h)
-                        .is_ok()
-                })
-                .unwrap_or(false);
-            (user_ok, pass_ok)
+            (
+                data.admin_username.clone(),
+                data.admin_password_hash.clone(),
+            )
         };
+        let user_ok = admin_username == username;
+        let pass_ok = PasswordHash::new(&password_hash).ok().is_some_and(|h| {
+            Argon2::default()
+                .verify_password(password.as_bytes(), &h)
+                .is_ok()
+        });
 
         if user_ok && pass_ok {
             self.lockouts
@@ -160,12 +208,7 @@ impl AuthStore {
             }))
         } else {
             let mut l = self.lockouts.lock().unwrap_or_else(|e| e.into_inner());
-            let entry = l.fails.entry(who.to_string()).or_insert((0, None));
-            entry.0 += 1;
-            if entry.0 >= MAX_FAILS {
-                entry.1 = Some(Instant::now() + std::time::Duration::from_secs(LOCKOUT_SECS));
-                entry.0 = 0;
-            }
+            l.record_failure(who, Instant::now());
             Ok(None)
         }
     }
@@ -240,19 +283,21 @@ impl AuthStore {
     }
 
     pub fn flush(&self) -> Result<()> {
-        let raw = {
-            let data = self.data.lock().unwrap_or_else(|e| e.into_inner());
-            serde_json::to_string_pretty(&*data)?
-        };
+        let data = self.data.lock().unwrap_or_else(|e| e.into_inner());
+        let raw = serde_json::to_string_pretty(&*data)?;
         let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, raw.as_bytes())?;
+        let mut file = std::fs::File::create(&tmp)?;
+        use std::io::Write;
+        file.write_all(raw.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
         std::fs::rename(&tmp, &self.path)?;
         self.dirty.store(false, Ordering::Relaxed);
         Ok(())
     }
 
     pub fn flush_if_dirty(&self) {
-        if self.dirty.swap(false, Ordering::Relaxed) {
+        if self.dirty.load(Ordering::Relaxed) {
             if let Err(e) = self.flush() {
                 tracing::error!("auth store flush failed: {e:#}");
             }
@@ -316,4 +361,99 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    fn test_store(path: &Path) -> AuthStore {
+        AuthStore {
+            path: path.to_owned(),
+            data: Mutex::new(AuthData {
+                admin_username: "admin".into(),
+                admin_password_hash: String::new(),
+                jwt_secret: "test-secret".into(),
+                keys: Vec::new(),
+            }),
+            dirty: AtomicBool::new(false),
+            lockouts: Mutex::new(Lockout::default()),
+        }
+    }
+
+    #[test]
+    fn lockout_entries_expire_and_stay_bounded() {
+        let mut lockout = Lockout::default();
+        let now = Instant::now();
+        lockout.record_failure("stale", now);
+        lockout.prune(now + std::time::Duration::from_secs(LOCKOUT_ENTRY_TTL_SECS));
+        assert!(lockout.fails.is_empty());
+        for _ in 0..MAX_FAILS {
+            lockout.record_failure("locked", now);
+        }
+        assert!(lockout.fails["locked"].until.unwrap() > now);
+        lockout.prune(now + std::time::Duration::from_secs(LOCKOUT_ENTRY_TTL_SECS));
+        assert!(lockout.fails.is_empty());
+        for i in 0..MAX_LOCKOUT_ENTRIES {
+            lockout.fails.insert(
+                i.to_string(),
+                LockoutEntry {
+                    fails: 1,
+                    until: None,
+                    last_seen: now,
+                },
+            );
+        }
+        lockout.fails.get_mut("0").unwrap().last_seen = now - std::time::Duration::from_secs(1);
+        lockout.record_failure("new", now);
+        assert_eq!(lockout.fails.len(), MAX_LOCKOUT_ENTRIES);
+        assert!(!lockout.fails.contains_key("0"));
+    }
+
+    #[test]
+    fn flush_failure_preserves_dirty_for_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let store = test_store(&path);
+        std::fs::create_dir(path.with_extension("json.tmp")).unwrap();
+        assert!(store.create_key("retry", Role::Viewer).is_err());
+        assert!(store.dirty.load(Ordering::Relaxed));
+        std::fs::remove_dir(path.with_extension("json.tmp")).unwrap();
+        store.flush_if_dirty();
+        assert!(!store.dirty.load(Ordering::Relaxed));
+        assert_eq!(AuthStore::load(&path).unwrap().list_keys().len(), 1);
+    }
+
+    #[test]
+    fn concurrent_key_writes_and_flushes_preserve_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let store = Arc::new(test_store(&path));
+        let barrier = Arc::new(Barrier::new(5));
+        std::thread::scope(|scope| {
+            for i in 0..4 {
+                let store = store.clone();
+                let barrier = barrier.clone();
+                scope.spawn(move || {
+                    barrier.wait();
+                    for n in 0..8 {
+                        let (_, token) =
+                            store.create_key(&format!("{i}-{n}"), Role::Viewer).unwrap();
+                        assert!(store.authenticate(&token, "test-secret").is_some());
+                        store.flush_if_dirty();
+                    }
+                });
+            }
+            barrier.wait();
+            for _ in 0..16 {
+                store.flush_if_dirty();
+            }
+        });
+        store.flush_if_dirty();
+        let keys = AuthStore::load(&path).unwrap().list_keys();
+        assert_eq!(keys.len(), 32);
+        assert!(keys.iter().all(|key| key.last_used_at.is_some()));
+        assert!(!store.dirty.load(Ordering::Relaxed));
+    }
 }

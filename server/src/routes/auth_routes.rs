@@ -3,6 +3,13 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 use std::net::SocketAddr;
+use std::sync::{Arc, OnceLock};
+use tokio::sync::Semaphore;
+
+fn login_slots() -> &'static Arc<Semaphore> {
+    static SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    SLOTS.get_or_init(|| Arc::new(Semaphore::new(2)))
+}
 
 use crate::auth::{issue_jwt, Role};
 use crate::error::{ApiError, ApiResult};
@@ -20,12 +27,28 @@ pub async fn login(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<LoginBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = format!("{}|{}", body.username, addr.ip());
+    if body.username.len() > 256 || body.password.len() > 1024 {
+        return Err(ApiError::BadRequest("login input too long".into()));
+    }
+    // Reject overload instead of queueing unbounded expensive password checks.
+    let permit = login_slots()
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::Conflict("login busy; retry later".into()))?;
+    // Lockout is tracked per source IP, not arbitrary usernames, to prevent a
+    // memory-exhaustion attack using unlimited username values.
+    let who = addr.ip().to_string();
     let secret = state.auth.jwt_secret();
-    let result = state
-        .auth
-        .login(&body.username, &body.password, &who)
-        .map_err(ApiError::from)?;
+    let auth = state.auth.clone();
+    let username = body.username.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        // The blocking task owns the permit even if the request is cancelled.
+        let _permit = permit;
+        auth.login(&username, &body.password, &who)
+    })
+    .await
+    .map_err(ApiError::from)?
+    .map_err(ApiError::from)?;
 
     match result {
         Some(ctx) => {
@@ -132,4 +155,31 @@ pub async fn delete_key(
         .audit
         .log(&ctx.username, role_str(&ctx.role), "key_delete", &id);
     Ok((StatusCode::OK, Json(serde_json::json!({"ok": true}))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn login_work_is_bounded_and_cancellation_keeps_permit() {
+        let slots = Arc::new(Semaphore::new(1));
+        let permit = slots.clone().try_acquire_owned().unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::task::spawn_blocking(move || {
+            let permit = permit;
+            started_tx.send(()).unwrap();
+            finish_rx.recv().unwrap();
+            drop(permit);
+            done_tx.send(()).unwrap();
+        });
+        started_rx.await.unwrap();
+        task.abort();
+        assert!(slots.clone().try_acquire_owned().is_err());
+        finish_tx.send(()).unwrap();
+        done_rx.await.unwrap();
+        assert!(slots.try_acquire_owned().is_ok());
+    }
 }

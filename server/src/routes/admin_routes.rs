@@ -17,6 +17,9 @@ async fn settings_value(state: &SharedState) -> serde_json::Value {
         "version": state.version,
         "tunnel": state.tunnel.info(),
         "update": cfg.update,
+        "resources": state.jobs.resources.status(),
+        "repair": cfg.repair,
+        "repair_status": crate::repair::status(&cfg.data_dir),
     })
 }
 
@@ -32,6 +35,8 @@ pub async fn get_settings(
 pub struct UpdateSettingsBody {
     pub tunnel: Option<TunnelUpdate>,
     pub update: Option<UpdatePrefUpdate>,
+    pub desktop_priority: Option<bool>,
+    pub repair: Option<crate::repair::RepairConfig>,
 }
 
 #[derive(Deserialize)]
@@ -53,62 +58,137 @@ pub async fn put_settings(
     Json(body): Json<UpdateSettingsBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     ctx.require(Role::Admin)?;
-    if let Some(t) = body.tunnel {
-        let port = {
-            let mut cfg = state.config.write().unwrap_or_else(|e| e.into_inner());
-            cfg.tunnel.enabled = t.enabled;
-            cfg.save().map_err(ApiError::from)?;
-            cfg.port
-        };
-        if t.enabled {
-            state.tunnel.start(port);
-        } else {
-            state.tunnel.stop();
+    let (port, tunnel_enabled) = {
+        let mut cfg = state.config.write().unwrap_or_else(|e| e.into_inner());
+        let mut next = cfg.clone();
+        if let Some(repair) = body.repair {
+            repair
+                .validate()
+                .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+            next.repair = repair;
         }
-        state.audit.log(
-            &ctx.username,
-            role_str(&ctx.role),
-            "settings_update",
-            &format!("tunnel.enabled={}", t.enabled),
-        );
-    }
-    if let Some(u) = body.update {
-        let detail = {
-            let mut cfg = state.config.write().unwrap_or_else(|e| e.into_inner());
-            if let Some(v) = u.auto_check {
-                cfg.update.auto_check = v;
+        if let Some(enabled) = body.desktop_priority {
+            next.desktop_priority = enabled;
+        }
+        if let Some(tunnel) = &body.tunnel {
+            next.tunnel.enabled = tunnel.enabled;
+        }
+        if let Some(update) = body.update {
+            if let Some(v) = update.auto_check {
+                next.update.auto_check = v;
             }
-            if let Some(v) = u.auto_install {
-                cfg.update.auto_install = v;
+            if let Some(v) = update.auto_install {
+                next.update.auto_install = v;
             }
-            if let Some(v) = u.check_interval_hours {
-                cfg.update.check_interval_hours = v;
+            if let Some(v) = update.check_interval_hours {
+                if !(1..=168).contains(&v) {
+                    return Err(ApiError::BadRequest(
+                        "確認間隔は1〜168時間で指定してください".into(),
+                    ));
+                }
+                next.update.check_interval_hours = v;
             }
-            if let Some(v) = u.repo {
-                if !v.contains('/') {
+            if let Some(repo) = update.repo {
+                let parts: Vec<_> = repo.split('/').collect();
+                if parts.len() != 2
+                    || parts.iter().any(|p| {
+                        p.is_empty()
+                            || *p == "."
+                            || *p == ".."
+                            || !p.bytes().all(|c| {
+                                c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.')
+                            })
+                    })
+                {
                     return Err(ApiError::BadRequest(
                         "repo は owner/repo 形式で指定してください".into(),
                     ));
                 }
-                cfg.update.repo = v;
+                next.update.repo = repo;
             }
-            cfg.save().map_err(ApiError::from)?;
-            format!(
-                "update.auto_check={} auto_install={} interval={}h repo={}",
-                cfg.update.auto_check,
-                cfg.update.auto_install,
-                cfg.update.check_interval_hours,
-                cfg.update.repo
-            )
-        };
-        state.audit.log(
-            &ctx.username,
-            role_str(&ctx.role),
-            "settings_update",
-            &detail,
-        );
+        }
+        // Validate the whole request before touching OS state or persisted config.
+        let old = cfg.desktop_priority;
+        if body.desktop_priority.is_some() {
+            state
+                .jobs
+                .resources
+                .set_enabled(next.desktop_priority)
+                .map_err(ApiError::from)?;
+        }
+        if let Err(e) = next.save() {
+            if body.desktop_priority.is_some() {
+                let _ = state.jobs.resources.set_enabled(old);
+            }
+            return Err(ApiError::from(e));
+        }
+        let result = (next.port, next.tunnel.enabled);
+        *cfg = next;
+        result
+    };
+    if body.tunnel.is_some() {
+        if tunnel_enabled {
+            state.tunnel.start(port);
+        } else {
+            state.tunnel.stop();
+        }
     }
+    state.audit.log(
+        &ctx.username,
+        role_str(&ctx.role),
+        "settings_update",
+        "validated configuration saved",
+    );
     Ok(Json(settings_value(&state).await))
+}
+
+pub async fn diagnose(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+) -> ApiResult<(axum::http::StatusCode, Json<serde_json::Value>)> {
+    ctx.require(Role::Admin)?;
+    let cfg = state
+        .config
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    cfg.repair
+        .validate()
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    if !cfg.repair.enabled {
+        return Err(ApiError::Conflict("AI診断は無効です".into()));
+    }
+    if cfg.data_dir.join("repair/active.lock").exists() {
+        return Err(ApiError::Conflict(
+            "診断ジョブが実行中、または前回の確認が必要です".into(),
+        ));
+    }
+    if std::env::var(&cfg.repair.api_key_env).map_or(true, |key| key.is_empty()) {
+        return Err(ApiError::BadRequest("APIキー環境変数が未設定です".into()));
+    }
+    let mut cmd = std::process::Command::new(std::env::current_exe().map_err(ApiError::from)?);
+    cmd.arg("repair-run")
+        .arg("--data-dir")
+        .arg(&cfg.data_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd.spawn().map_err(ApiError::from)?;
+    state.audit.log(
+        &ctx.username,
+        role_str(&ctx.role),
+        "repair_diagnose",
+        "manual request",
+    );
+    Ok((
+        axum::http::StatusCode::ACCEPTED,
+        Json(serde_json::json!({"queued":true})),
+    ))
 }
 
 #[derive(Deserialize)]

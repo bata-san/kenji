@@ -91,6 +91,7 @@ export interface Overview {
   gpus: GpuInfo[];
   jobs_summary: JobsSummary;
   tunnel: TunnelInfo;
+  resources: ResourceStatus;
 }
 
 // ---------- Jobs ----------
@@ -137,6 +138,31 @@ export interface UpdateConfigInfo {
   repo: string;
 }
 
+export interface ResourceStatus {
+  enabled: boolean;
+  supported: boolean;
+  cpu_limit_percent: number;
+  memory_limit_bytes: number;
+  scope: string;
+  error: string | null;
+}
+
+export interface RepairConfig {
+  enabled: boolean;
+  provider: string;
+  model: string;
+  base_url: string;
+  api_key_env: string;
+  harness_path: string;
+}
+
+export interface RepairStatus {
+  state: 'idle' | 'running' | 'completed' | 'failed';
+  id?: string;
+  error?: string;
+  output_file?: string;
+}
+
 export interface Settings {
   data_dir: string;
   workspace_root: string;
@@ -145,6 +171,9 @@ export interface Settings {
   version: string;
   tunnel: TunnelInfo;
   update: UpdateConfigInfo;
+  resources: ResourceStatus;
+  repair: RepairConfig;
+  repair_status: RepairStatus;
 }
 
 // ---------- Update ----------

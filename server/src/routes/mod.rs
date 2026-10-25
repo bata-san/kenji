@@ -167,6 +167,7 @@ pub fn build_router(state: SharedState) -> Router {
             get(admin_routes::get_settings).put(admin_routes::put_settings),
         )
         .route("/api/audit", get(admin_routes::audit_list))
+        .route("/api/repair/diagnose", post(admin_routes::diagnose))
         .route("/api/update/status", get(update_routes::status))
         .route("/api/update/check", post(update_routes::check))
         .route("/api/update/install", post(update_routes::install))
@@ -178,15 +179,16 @@ pub fn build_router(state: SharedState) -> Router {
         .fallback(static_handler)
         // ハンドラ内のパニックを握り潰さず 500 JSON に変換する（サーバー全体は継続稼働）
         .layer(CatchPanicLayer::custom(|panic| {
+            tracing::error!("request panic: {}", panic_message(panic));
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 axum::Json(serde_json::json!({
-                    "error": { "code": "internal", "message": format!("内部エラー: {}", panic_message(panic)) }
+                    "error": { "code": "internal", "message": "内部エラーが発生しました" }
                 })),
             )
                 .into_response()
         }))
-        .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024 * 1024))
+        .layer(axum::extract::DefaultBodyLimit::max(512 * 1024 * 1024))
 }
 
 /// `std::panic::panic_any` のペイロードは型不明なので、主要な2型からメッセージを取り出す

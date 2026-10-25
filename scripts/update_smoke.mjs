@@ -10,7 +10,7 @@ import { spawn, execSync } from 'node:child_process';
 const ROOT = process.cwd();
 // リリースバイナリを優先（デバッグバイナリは128MB上限を超えうる）
 const candidates = ['target/release/kenji.exe', 'target/debug/kenji.exe'];
-const EXE = candidates.find((p) => fs.existsSync(path.join(ROOT, p)));
+const EXE = process.env.KENJI_TEST_EXE || candidates.find((p) => fs.existsSync(path.join(ROOT, p)));
 const DATA = path.join(ROOT, '.data-update');
 const PORT = 8790;
 const FAKE_PORT = 8791;

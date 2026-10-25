@@ -59,6 +59,9 @@ import {
   useConfirm,
 } from '@/components/kit';
 
+import RepairSettings from '@/components/RepairSettings';
+import DesktopPriority from '@/components/DesktopPriority';
+
 type BadgeVariant = NonNullable<BadgeProps['variant']>;
 
 const TUNNEL_STATUS: Record<string, { label: string; variant: BadgeVariant }> = {
@@ -282,11 +285,13 @@ export default function Settings() {
             <TabsList>
               <TabsTrigger value="server">サーバー設定</TabsTrigger>
               <TabsTrigger value="update">アップデート</TabsTrigger>
+              <TabsTrigger value="repair">AI診断・修復</TabsTrigger>
               <TabsTrigger value="keys">APIキー</TabsTrigger>
               <TabsTrigger value="audit">監査ログ</TabsTrigger>
             </TabsList>
 
             <TabsContent value="server" className="mt-3 space-y-3">
+              <DesktopPriority />
               <Card>
                 <CardHeader>
                   <CardTitle>サーバー設定</CardTitle>
@@ -339,6 +344,10 @@ export default function Settings() {
                   </Button>
                 </div>
               </Card>
+            </TabsContent>
+
+            <TabsContent value="repair" className="mt-3 space-y-3">
+              <RepairSettings settings={settings} onSaved={setSettings} />
             </TabsContent>
 
             <TabsContent value="update" className="mt-3 space-y-3">

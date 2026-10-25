@@ -243,6 +243,7 @@ pub struct JobManager {
     logs_dir: PathBuf,
     pub workspace_root: PathBuf,
     audit: Arc<Audit>,
+    pub resources: Arc<crate::resources::ResourceGuard>,
 }
 
 impl JobManager {
@@ -250,6 +251,7 @@ impl JobManager {
         data_dir: &std::path::Path,
         workspace_root: PathBuf,
         audit: Arc<Audit>,
+        resources: Arc<crate::resources::ResourceGuard>,
     ) -> Arc<JobManager> {
         Arc::new(JobManager {
             defs: RwLock::new(Vec::new()),
@@ -258,6 +260,7 @@ impl JobManager {
             logs_dir: data_dir.join("logs"),
             workspace_root,
             audit,
+            resources,
         })
     }
 
@@ -312,12 +315,16 @@ impl JobManager {
     }
 
     fn persist(&self) -> Result<()> {
-        let raw = {
-            let defs = self.defs.read().unwrap_or_else(|e| e.into_inner());
-            serde_json::to_string_pretty(&*defs)?
-        };
+        // Serialize concurrent snapshots and disk writes under one lock. A shared
+        // fixed temp path must never be written concurrently by API requests.
+        let defs = self.defs.write().unwrap_or_else(|e| e.into_inner());
+        let raw = serde_json::to_string_pretty(&*defs)?;
         let tmp = self.defs_path.with_extension("json.tmp");
-        std::fs::write(&tmp, raw)?;
+        use std::io::Write;
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(raw.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
         std::fs::rename(&tmp, &self.defs_path)?;
         Ok(())
     }
@@ -736,12 +743,23 @@ impl JobManager {
         cmd.stderr(std::process::Stdio::piped());
         #[cfg(windows)]
         {
-            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            cmd.creation_flags(0x0800_0004); // CREATE_NO_WINDOW | CREATE_SUSPENDED: attach before user code runs
         }
         let child = cmd
             .spawn()
             .with_context(|| format!("コマンドの起動に失敗: {}", def.command))?;
         let mut child = child;
+        if let Some(pid) = child.id() {
+            if let Err(e) = self
+                .resources
+                .attach(pid)
+                .and_then(|_| crate::resources::resume_suspended(pid))
+            {
+                kill_tree(pid);
+                let _ = child.kill().await;
+                return Err(e);
+            }
+        }
         if let Some(out) = child.stdout.take() {
             spawn_log_pump(rt.clone(), out);
         }

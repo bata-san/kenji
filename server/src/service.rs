@@ -136,6 +136,7 @@ fn run_service_impl() -> Result<()> {
     // Give the server up to 15s to shut down gracefully; surface abnormal ends.
     let outcome = rt
         .block_on(async { tokio::time::timeout(std::time::Duration::from_secs(15), server).await });
+    let failed = !matches!(&outcome, Ok(Ok(0)));
     match outcome {
         Ok(Ok(0)) => {}
         Ok(Ok(code)) => log_to_file(&format!("server exited with code {code}")),
@@ -148,12 +149,15 @@ fn run_service_impl() -> Result<()> {
             service_type: SERVICE_TYPE,
             current_state: ServiceState::Stopped,
             controls_accepted: ServiceControlAccept::empty(),
-            exit_code: ServiceExitCode::Win32(0),
+            exit_code: ServiceExitCode::Win32(if failed { 1 } else { 0 }),
             checkpoint: 0,
             wait_hint: std::time::Duration::default(),
             process_id: None,
         })
         .ok();
+    if failed {
+        anyhow::bail!("サーバーが異常終了しました");
+    }
     Ok(())
 }
 

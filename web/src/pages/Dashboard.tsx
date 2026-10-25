@@ -15,6 +15,7 @@ import { Badge } from '@/components/ui/badge';
 import { Card, CardHeader, CardTitle } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { PageHeader } from '@/components/kit';
+import DesktopPriority from '@/components/DesktopPriority';
 
 interface Sample {
   t: string;
@@ -79,6 +80,8 @@ export default function Dashboard() {
             </span>
           )}
         </PageHeader>
+
+        <DesktopPriority />
 
         {ov ? (
           <>

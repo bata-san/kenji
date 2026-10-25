@@ -24,6 +24,10 @@ pub async fn overview(
     let mut value = serde_json::to_value(&snap).unwrap_or_default();
     if let Some(obj) = value.as_object_mut() {
         obj.insert(
+            "resources".into(),
+            serde_json::to_value(state.jobs.resources.status()).unwrap_or_default(),
+        );
+        obj.insert(
             "jobs_summary".into(),
             serde_json::json!({"running": running, "total": total, "failed": failed}),
         );

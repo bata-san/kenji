@@ -111,13 +111,9 @@ impl Api {
 
     /// Download a file as (lossy) UTF-8 text.
     fn download_text(&self, path: &str, max_bytes: usize) -> Result<String, ToolError> {
-        let url = format!(
-            "{}/api/files/download?path={}&token={}",
-            self.base,
-            Self::enc(path),
-            Self::enc(&self.token)
-        );
+        let url = format!("{}/api/files/download?path={}", self.base, Self::enc(path));
         let resp = ureq::get(&url)
+            .set("Authorization", &format!("Bearer {}", self.token))
             .call()
             .map_err(|e| ToolError::msg(format!("download failed: {e}")))?;
         let mut buf = Vec::new();

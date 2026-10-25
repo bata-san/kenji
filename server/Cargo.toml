@@ -38,6 +38,7 @@ tower-http = { version = "0.6", features = ["catch-panic"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_System_SystemInformation"] }
 
 [dev-dependencies]
 tempfile = "3"
