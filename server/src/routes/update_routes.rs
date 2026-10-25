@@ -16,7 +16,7 @@ pub async fn status(
     ctx: AuthCtx,
 ) -> ApiResult<Json<serde_json::Value>> {
     ctx.require(Role::Admin)?;
-    let cfg = state.config.read().unwrap();
+    let cfg = state.config.read().unwrap_or_else(|e| e.into_inner());
     Ok(Json(state.update.snapshot(&cfg.update)))
 }
 
@@ -26,7 +26,13 @@ pub async fn check(
     ctx: AuthCtx,
 ) -> ApiResult<Json<serde_json::Value>> {
     ctx.require(Role::Admin)?;
-    let repo = state.config.read().unwrap().update.repo.clone();
+    let repo = state
+        .config
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .update
+        .repo
+        .clone();
     let result = state.update.check(&repo).await;
     let detail = match &result {
         Ok(Some(r)) => {
@@ -38,14 +44,20 @@ pub async fn check(
                 "repo={} 最新=v{} {}",
                 repo,
                 r.version,
-                if newer { "（更新あり）" } else { "（最新状態）" }
+                if newer {
+                    "（更新あり）"
+                } else {
+                    "（最新状態）"
+                }
             )
         }
         Ok(None) => format!("repo={} リリースが存在しません", repo),
         Err(e) => format!("repo={} 失敗: {e}", repo),
     };
-    state.audit.log(&ctx.username, role_str(&ctx.role), "update_check", &detail);
-    let cfg = state.config.read().unwrap();
+    state
+        .audit
+        .log(&ctx.username, role_str(&ctx.role), "update_check", &detail);
+    let cfg = state.config.read().unwrap_or_else(|e| e.into_inner());
     Ok(Json(state.update.snapshot(&cfg.update)))
 }
 

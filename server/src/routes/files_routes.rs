@@ -16,7 +16,12 @@ use crate::routes::{bearer_auth, AuthCtx};
 use crate::state::{role_str, SharedState};
 
 fn workspace_root(state: &SharedState) -> PathBuf {
-    state.config.read().unwrap().workspace_root.clone()
+    state
+        .config
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .workspace_root
+        .clone()
 }
 
 fn normalize(rel: &str) -> String {
@@ -36,11 +41,14 @@ pub struct PathQuery {
 
 fn resolve_checked(state: &SharedState, rel: &str) -> ApiResult<(PathBuf, String)> {
     let root = workspace_root(state);
-    let p = files::resolve_under_root(&root, rel).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let p =
+        files::resolve_under_root(&root, rel).map_err(|e| ApiError::BadRequest(e.to_string()))?;
     Ok((p, normalize(rel)))
 }
 
 // ---- list ----
+
+type FsEntry = (String, String, Option<u64>, Option<DateTime<Utc>>);
 
 pub async fn list(
     State(state): State<SharedState>,
@@ -49,20 +57,24 @@ pub async fn list(
 ) -> ApiResult<Json<serde_json::Value>> {
     ctx.require(Role::Viewer)?;
     let (dir, norm) = resolve_checked(&state, q.path.as_deref().unwrap_or("/"))?;
-    let dir = files::ensure_within(&workspace_root(&state), &dir)
-        .map_err(|_| ApiError::NotFound)?;
+    let dir =
+        files::ensure_within(&workspace_root(&state), &dir).map_err(|_| ApiError::NotFound)?;
 
-    let mut entries: Vec<(String, String, Option<u64>, Option<DateTime<Utc>>)> = Vec::new();
-    let mut rd = tokio::fs::read_dir(&dir).await.map_err(|_| ApiError::NotFound)?;
+    let mut entries: Vec<FsEntry> = Vec::new();
+    let mut rd = tokio::fs::read_dir(&dir)
+        .await
+        .map_err(|_| ApiError::NotFound)?;
     while let Some(e) = rd.next_entry().await.map_err(ApiError::from)? {
         let name = e.file_name().to_string_lossy().to_string();
-        let Ok(meta) = e.metadata().await else { continue };
+        let Ok(meta) = e.metadata().await else {
+            continue;
+        };
         let (kind, size) = if meta.is_dir() {
             ("dir".to_string(), None)
         } else {
             ("file".to_string(), Some(meta.len()))
         };
-        let modified = meta.modified().ok().map(|t| DateTime::<Utc>::from(t));
+        let modified = meta.modified().ok().map(DateTime::<Utc>::from);
         entries.push((name, kind, size, modified));
     }
     // directories first, then case-insensitive name order
@@ -95,8 +107,12 @@ pub async fn mkdir(
 ) -> ApiResult<Json<serde_json::Value>> {
     ctx.require(Role::Operator)?;
     let (dir, norm) = resolve_checked(&state, &body.path)?;
-    tokio::fs::create_dir_all(&dir).await.map_err(ApiError::from)?;
-    state.audit.log(&ctx.username, role_str(&ctx.role), "file_mkdir", &norm);
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(ApiError::from)?;
+    state
+        .audit
+        .log(&ctx.username, role_str(&ctx.role), "file_mkdir", &norm);
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -116,11 +132,22 @@ pub async fn r#move(
     ctx.require(Role::Operator)?;
     let (from, from_norm) = resolve_checked(&state, &body.from)?;
     let (to, to_norm) = resolve_checked(&state, &body.to)?;
-    files::safe_file_name(&normalize(&body.to).trim_start_matches('/').rsplit('/').next().unwrap_or(""))?;
-    tokio::fs::rename(&from, &to).await.map_err(ApiError::from)?;
-    state
-        .audit
-        .log(&ctx.username, role_str(&ctx.role), "file_move", &format!("{from_norm} → {to_norm}"));
+    files::safe_file_name(
+        normalize(&body.to)
+            .trim_start_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or(""),
+    )?;
+    tokio::fs::rename(&from, &to)
+        .await
+        .map_err(ApiError::from)?;
+    state.audit.log(
+        &ctx.username,
+        role_str(&ctx.role),
+        "file_move",
+        &format!("{from_norm} → {to_norm}"),
+    );
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -134,9 +161,13 @@ pub async fn delete(
     ctx.require(Role::Operator)?;
     let (p, norm) = resolve_checked(&state, q.path.as_deref().unwrap_or("/"))?;
     if p == workspace_root(&state) {
-        return Err(ApiError::BadRequest("ワークスペースルートは削除できません".into()));
+        return Err(ApiError::BadRequest(
+            "ワークスペースルートは削除できません".into(),
+        ));
     }
-    let meta = tokio::fs::metadata(&p).await.map_err(|_| ApiError::NotFound)?;
+    let meta = tokio::fs::metadata(&p)
+        .await
+        .map_err(|_| ApiError::NotFound)?;
     if meta.is_dir() {
         tokio::task::spawn_blocking(move || std::fs::remove_dir_all(p))
             .await
@@ -145,7 +176,9 @@ pub async fn delete(
     } else {
         tokio::fs::remove_file(&p).await.map_err(ApiError::from)?;
     }
-    state.audit.log(&ctx.username, role_str(&ctx.role), "file_delete", &norm);
+    state
+        .audit
+        .log(&ctx.username, role_str(&ctx.role), "file_delete", &norm);
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -160,9 +193,16 @@ pub struct DownloadQuery {
 fn content_disposition(name: &str) -> String {
     let fallback: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
-    let encoded = percent_encoding::utf8_percent_encode(name, percent_encoding::NON_ALPHANUMERIC).to_string();
+    let encoded =
+        percent_encoding::utf8_percent_encode(name, percent_encoding::NON_ALPHANUMERIC).to_string();
     format!("attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}")
 }
 
@@ -175,10 +215,10 @@ pub async fn download(
     let ctx = match &q.token {
         Some(t) => {
             let secret = state.auth.jwt_secret();
-            state
-                .auth
-                .authenticate(t, &secret)
-                .map(|c| AuthCtx { username: c.username, role: c.role })
+            state.auth.authenticate(t, &secret).map(|c| AuthCtx {
+                username: c.username,
+                role: c.role,
+            })
         }
         None => bearer_auth(&state, &headers).ok(),
     };
@@ -188,7 +228,9 @@ pub async fn download(
     let (p, norm) = resolve_checked(&state, &q.path)?;
     let root = workspace_root(&state);
     let p = files::ensure_within(&root, &p).map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    let meta = tokio::fs::metadata(&p).await.map_err(|_| ApiError::NotFound)?;
+    let meta = tokio::fs::metadata(&p)
+        .await
+        .map_err(|_| ApiError::NotFound)?;
     if meta.is_dir() {
         return Err(ApiError::BadRequest("ディレクトリのダウンロードは未対応です（サブフォルダは個別にダウンロードしてください）".into()));
     }
@@ -202,10 +244,7 @@ pub async fn download(
     let resp = Response::builder()
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(header::CONTENT_LENGTH, meta.len())
-        .header(
-            header::CONTENT_DISPOSITION,
-            content_disposition(&name),
-        )
+        .header(header::CONTENT_DISPOSITION, content_disposition(&name))
         .body(body)
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("{e}")))?;
     state
@@ -240,7 +279,9 @@ pub async fn upload(
         let orig = field.file_name().unwrap_or("upload.bin").to_string();
         let safe = files::safe_file_name(&orig).map_err(|e| ApiError::BadRequest(e.to_string()))?;
         let dest = dir.join(&safe);
-        let mut f = tokio::fs::File::create(&dest).await.map_err(ApiError::from)?;
+        let mut f = tokio::fs::File::create(&dest)
+            .await
+            .map_err(ApiError::from)?;
         let mut size: u64 = 0;
         while let Some(chunk) = field
             .chunk()
@@ -257,7 +298,11 @@ pub async fn upload(
         &ctx.username,
         role_str(&ctx.role),
         "file_upload",
-        &format!("{} ({} files)", normalize(&q.path.unwrap_or_default()), saved.len()),
+        &format!(
+            "{} ({} files)",
+            normalize(&q.path.unwrap_or_default()),
+            saved.len()
+        ),
     );
     Ok(Json(serde_json::json!({ "ok": true, "saved": saved })))
 }

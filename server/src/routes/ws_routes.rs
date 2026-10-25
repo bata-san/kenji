@@ -28,16 +28,27 @@ pub async fn terminal_ws(
         .map_err(|e| ApiError::Conflict(e.to_string()))?;
 
     let (shell, args, workspace) = {
-        let cfg = state.config.read().unwrap();
-        (cfg.terminal.shell.clone(), cfg.terminal.args.clone(), cfg.workspace_root.clone())
+        let cfg = state.config.read().unwrap_or_else(|e| e.into_inner());
+        (
+            cfg.terminal.shell.clone(),
+            cfg.terminal.args.clone(),
+            cfg.workspace_root.clone(),
+        )
     };
     let session = PtySession::open(&shell, &args, &workspace, 80, 24).map_err(ApiError::from)?;
-    state.audit.log(&ctx.username, role_str(&ctx.role), "terminal_open", &shell);
+    state
+        .audit
+        .log(&ctx.username, role_str(&ctx.role), "terminal_open", &shell);
 
     Ok(ws.on_upgrade(move |socket| async move {
         let _guard = guard; // releases the session slot on drop
 
-        let PtySession { reader, writer, master, mut killer } = session;
+        let PtySession {
+            reader,
+            writer,
+            master,
+            mut killer,
+        } = session;
         let (mut ws_tx, mut ws_rx) = socket.split();
 
         // PTY reader → client (blocking reads on a dedicated thread).

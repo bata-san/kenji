@@ -8,7 +8,7 @@ use crate::routes::AuthCtx;
 use crate::state::{role_str, SharedState};
 
 async fn settings_value(state: &SharedState) -> serde_json::Value {
-    let cfg = state.config.read().unwrap();
+    let cfg = state.config.read().unwrap_or_else(|e| e.into_inner());
     serde_json::json!({
         "data_dir": cfg.data_dir,
         "workspace_root": cfg.workspace_root,
@@ -55,7 +55,7 @@ pub async fn put_settings(
     ctx.require(Role::Admin)?;
     if let Some(t) = body.tunnel {
         let port = {
-            let mut cfg = state.config.write().unwrap();
+            let mut cfg = state.config.write().unwrap_or_else(|e| e.into_inner());
             cfg.tunnel.enabled = t.enabled;
             cfg.save().map_err(ApiError::from)?;
             cfg.port
@@ -74,7 +74,7 @@ pub async fn put_settings(
     }
     if let Some(u) = body.update {
         let detail = {
-            let mut cfg = state.config.write().unwrap();
+            let mut cfg = state.config.write().unwrap_or_else(|e| e.into_inner());
             if let Some(v) = u.auto_check {
                 cfg.update.auto_check = v;
             }
@@ -86,7 +86,9 @@ pub async fn put_settings(
             }
             if let Some(v) = u.repo {
                 if !v.contains('/') {
-                    return Err(ApiError::BadRequest("repo は owner/repo 形式で指定してください".into()));
+                    return Err(ApiError::BadRequest(
+                        "repo は owner/repo 形式で指定してください".into(),
+                    ));
                 }
                 cfg.update.repo = v;
             }
@@ -99,7 +101,12 @@ pub async fn put_settings(
                 cfg.update.repo
             )
         };
-        state.audit.log(&ctx.username, role_str(&ctx.role), "settings_update", &detail);
+        state.audit.log(
+            &ctx.username,
+            role_str(&ctx.role),
+            "settings_update",
+            &detail,
+        );
     }
     Ok(Json(settings_value(&state).await))
 }

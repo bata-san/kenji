@@ -57,16 +57,24 @@ impl MetricsCache {
             os: os_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             uptime_secs: 0,
-            cpu: CpuInfo { cores: 0, usage_percent: 0.0 },
-            memory: MemInfo { total_bytes: 0, used_bytes: 0 },
+            cpu: CpuInfo {
+                cores: 0,
+                usage_percent: 0.0,
+            },
+            memory: MemInfo {
+                total_bytes: 0,
+                used_bytes: 0,
+            },
             disks: Vec::new(),
             gpus: Vec::new(),
         };
-        Arc::new(MetricsCache { value: RwLock::new(initial) })
+        Arc::new(MetricsCache {
+            value: RwLock::new(initial),
+        })
     }
 
     pub fn snapshot(&self) -> Overview {
-        self.value.read().unwrap().clone()
+        self.value.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }
 
@@ -99,7 +107,7 @@ pub fn start_poller(cache: Arc<MetricsCache>, _jobs: Arc<JobManager>) {
                 total_bytes: sys.total_memory(),
                 used_bytes: sys.used_memory(),
             };
-            let disks: Vec<DiskInfo> = if tick % 10 == 0 {
+            let disks: Vec<DiskInfo> = if tick.is_multiple_of(10) {
                 let d = Disks::new_with_refreshed_list();
                 d.list()
                     .iter()
@@ -112,7 +120,7 @@ pub fn start_poller(cache: Arc<MetricsCache>, _jobs: Arc<JobManager>) {
                     .filter(|d| d.total_bytes > 0)
                     .collect()
             } else {
-                let cur = cache.value.read().unwrap();
+                let cur = cache.value.read().unwrap_or_else(|e| e.into_inner());
                 cur.disks.clone()
             };
             let gpus = collect_gpus(nvml.as_ref());
@@ -126,7 +134,7 @@ pub fn start_poller(cache: Arc<MetricsCache>, _jobs: Arc<JobManager>) {
                 disks,
                 gpus,
             };
-            *cache.value.write().unwrap() = v;
+            *cache.value.write().unwrap_or_else(|e| e.into_inner()) = v;
             tick += 1;
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
@@ -136,10 +144,16 @@ pub fn start_poller(cache: Arc<MetricsCache>, _jobs: Arc<JobManager>) {
 fn collect_gpus(nvml: Option<&nvml_wrapper::Nvml>) -> Vec<GpuInfo> {
     let Some(nvml) = nvml else { return Vec::new() };
     let mut out = Vec::new();
-    let Ok(count) = nvml.device_count() else { return out };
+    let Ok(count) = nvml.device_count() else {
+        return out;
+    };
     for i in 0..count {
-        let Ok(dev) = nvml.device_by_index(i) else { continue };
-        let (Ok(name), Ok(util), Ok(mem)) = (dev.name(), dev.utilization_rates(), dev.memory_info()) else {
+        let Ok(dev) = nvml.device_by_index(i) else {
+            continue;
+        };
+        let (Ok(name), Ok(util), Ok(mem)) =
+            (dev.name(), dev.utilization_rates(), dev.memory_info())
+        else {
             continue;
         };
         out.push(GpuInfo {

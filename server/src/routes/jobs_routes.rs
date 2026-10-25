@@ -97,7 +97,10 @@ pub async fn get_logs(
     Query(q): Query<LogsQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     ctx.require(Role::Viewer)?;
-    let rt = state.jobs.runtime_if_exists(&id).ok_or(ApiError::NotFound)?;
+    let rt = state
+        .jobs
+        .runtime_if_exists(&id)
+        .ok_or(ApiError::NotFound)?;
     let max = q.max_bytes.unwrap_or(64 * 1024).min(1024 * 1024);
     let content = rt.tail(max);
     Ok(Json(json!({ "content": content })))
@@ -145,7 +148,7 @@ pub async fn logs_ws(
                     }
                 }
                 _ = ticker.tick() => {
-                    let st = *rt.status.read().unwrap();
+                    let st = *rt.status.read().unwrap_or_else(|e| e.into_inner());
                     if last_status != Some(st) {
                         last_status = Some(st);
                         let job = jobs.get(&id);

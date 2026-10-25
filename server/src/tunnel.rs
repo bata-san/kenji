@@ -69,7 +69,10 @@ impl TunnelSupervisor {
                 .unwrap_or(false),
             None => false,
         };
-        self.inner.lock().unwrap().available = ok;
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .available = ok;
         ok
     }
 
@@ -83,7 +86,7 @@ impl TunnelSupervisor {
     }
 
     pub fn info(&self) -> TunnelInfo {
-        let i = self.inner.lock().unwrap();
+        let i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         TunnelInfo {
             available: i.available,
             enabled: i.enabled,
@@ -97,7 +100,7 @@ impl TunnelSupervisor {
     pub fn start(self: &Arc<Self>, port: u16) {
         self.detect_available();
         {
-            let mut i = self.inner.lock().unwrap();
+            let mut i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             if !i.available {
                 i.enabled = false;
                 i.state = TunnelState::Unavailable;
@@ -117,7 +120,7 @@ impl TunnelSupervisor {
 
     /// Stop the tunnel and mark disabled.
     pub fn stop(&self) {
-        let mut i = self.inner.lock().unwrap();
+        let mut i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         i.enabled = false;
         i.url = None;
         i.state = TunnelState::Disabled;
@@ -130,7 +133,7 @@ impl TunnelSupervisor {
     async fn supervise(self: Arc<Self>, port: u16) {
         loop {
             let (enabled, exe) = {
-                let i = self.inner.lock().unwrap();
+                let i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
                 (i.enabled, self.find_exe())
             };
             if !enabled {
@@ -148,14 +151,14 @@ impl TunnelSupervisor {
             let mut child = match child {
                 Ok(c) => c,
                 Err(e) => {
-                    let mut i = self.inner.lock().unwrap();
+                    let mut i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
                     i.state = TunnelState::Error;
                     i.error = Some(format!("cloudflared の起動に失敗: {e}"));
                     break;
                 }
             };
             {
-                let mut i = self.inner.lock().unwrap();
+                let mut i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
                 i.state = TunnelState::Starting;
                 i.url = None;
                 i.error = None;
@@ -163,7 +166,7 @@ impl TunnelSupervisor {
             let stdout = child.stdout.take();
             let stderr = child.stderr.take();
             {
-                let mut i = self.inner.lock().unwrap();
+                let mut i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
                 i.child = Some(child);
             }
             let sup = self.clone();
@@ -178,7 +181,7 @@ impl TunnelSupervisor {
             // Wait for the child to exit (poll; stop() may take and kill it meanwhile).
             let exit: Option<std::process::ExitStatus> = loop {
                 tokio::time::sleep(Duration::from_secs(1)).await;
-                let mut i = self.inner.lock().unwrap();
+                let mut i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
                 match i.child.as_mut().map(|c| c.try_wait()) {
                     Some(Ok(Some(status))) => break Some(status),
                     Some(Err(_)) | None => break None,
@@ -186,19 +189,21 @@ impl TunnelSupervisor {
                 }
             };
             {
-                let mut i = self.inner.lock().unwrap();
+                let mut i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
                 i.child = None;
                 if !i.enabled {
                     break;
                 }
                 i.state = TunnelState::Stopped;
-                i.error = Some(format!("cloudflared が終了しました {exit:?}。{RESTART_DELAY_SECS} 秒後に再起動します"));
+                i.error = Some(format!(
+                    "cloudflared が終了しました {exit:?}。{RESTART_DELAY_SECS} 秒後に再起動します"
+                ));
             }
             tracing::warn!("tunnel exited {exit:?}; restarting in {RESTART_DELAY_SECS}s");
             tokio::time::sleep(Duration::from_secs(RESTART_DELAY_SECS)).await;
         }
         // final state sync if not explicitly stopped
-        let mut i = self.inner.lock().unwrap();
+        let mut i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if !i.enabled {
             i.state = TunnelState::Disabled;
         }
@@ -217,7 +222,7 @@ async fn scan_output(sup: Arc<TunnelSupervisor>, mut stream: impl tokio::io::Asy
                 buf.extend_from_slice(&chunk[..n]);
                 let text = String::from_utf8_lossy(&buf).into_owned();
                 if let Some(url) = extract_tunnel_url(&text) {
-                    let mut i = sup.inner.lock().unwrap();
+                    let mut i = sup.inner.lock().unwrap_or_else(|e| e.into_inner());
                     i.url = Some(url);
                     i.state = TunnelState::Running;
                     i.error = None;
@@ -237,9 +242,7 @@ fn extract_tunnel_url(text: &str) -> Option<String> {
     for tok in text.split(|c: char| c.is_whitespace() || c == '|' || c == '"') {
         if let Some(host) = tok.strip_prefix("https://") {
             if let Some(host) = host.strip_suffix(".trycloudflare.com") {
-                if !host.is_empty()
-                    && host.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-                {
+                if !host.is_empty() && host.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
                     return Some(format!("https://{host}.trycloudflare.com"));
                 }
             }
@@ -260,9 +263,6 @@ mod tests {
             Some("https://abc-def-xyz.trycloudflare.com")
         );
         assert_eq!(extract_tunnel_url("no url here"), None);
-        assert_eq!(
-            extract_tunnel_url("bad https://x$.trycloudflare.com nope").is_none(),
-            true
-        );
+        assert!(extract_tunnel_url("bad https://x$.trycloudflare.com nope").is_none());
     }
 }

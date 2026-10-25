@@ -7,7 +7,7 @@ use std::sync::mpsc;
 use anyhow::{Context, Result};
 use windows_service::service::{
     ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
-    ServiceInfo, ServiceState, ServiceStatus, ServiceStartType, ServiceType,
+    ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
 };
 use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
@@ -43,7 +43,8 @@ fn windows_service_main(_arguments: Vec<OsString>) {
 
 /// Entry: run the HTTP server as a Windows service (called via SCM).
 pub fn run() -> Result<()> {
-    service_dispatcher::start(SERVICE_NAME, ffi_service_main).context("サービスディスパッチャの開始に失敗（サービスコンテキスト外での実行?)")
+    service_dispatcher::start(SERVICE_NAME, ffi_service_main)
+        .context("サービスディスパッチャの開始に失敗（サービスコンテキスト外での実行?)")
 }
 
 fn run_service_impl() -> Result<()> {
@@ -103,12 +104,20 @@ fn run_service_impl() -> Result<()> {
         })
         .context("ステータス更新に失敗")?;
 
-    // Block the service thread until SCM requests stop.
+    // Block the service thread until SCM requests stop — or the server task
+    // dies unexpectedly (panic), in which case we also tear down to avoid a
+    // zombie "Running" service that serves nothing.
     loop {
-        match stop_rx.recv() {
+        match stop_rx.recv_timeout(std::time::Duration::from_millis(500)) {
             Ok(ServiceControl::Stop) => break,
-            Err(_) => break, // handler dropped
             Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if server.is_finished() {
+                    log_to_file("サーバータスクが予期せず終了しました（パニックの可能性）");
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break, // handler dropped
         }
     }
     event_handler
@@ -124,10 +133,15 @@ fn run_service_impl() -> Result<()> {
         .ok();
     let _ = shutdown_tx.send(true);
 
-    // Give the server up to 15s to shut down gracefully.
-    let _ = rt.block_on(async {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(15), server).await;
-    });
+    // Give the server up to 15s to shut down gracefully; surface abnormal ends.
+    let outcome = rt
+        .block_on(async { tokio::time::timeout(std::time::Duration::from_secs(15), server).await });
+    match outcome {
+        Ok(Ok(0)) => {}
+        Ok(Ok(code)) => log_to_file(&format!("server exited with code {code}")),
+        Ok(Err(join)) => log_to_file(&format!("server task failed: {join}")),
+        Err(_) => log_to_file("server did not stop within 15s"),
+    }
 
     event_handler
         .set_service_status(ServiceStatus {
@@ -180,10 +194,13 @@ pub fn install(account: Option<(String, String)>) -> Result<()> {
 
 /// Remove the service registration. Must run elevated.
 pub fn uninstall() -> Result<()> {
-    let manager =
-        ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::all()).context("サービスマネージャへの接続に失敗（管理者権限が必要です）")?;
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::all())
+        .context("サービスマネージャへの接続に失敗（管理者権限が必要です）")?;
     let service = manager
-        .open_service(SERVICE_NAME, ServiceAccess::DELETE | ServiceAccess::QUERY_STATUS)
+        .open_service(
+            SERVICE_NAME,
+            ServiceAccess::DELETE | ServiceAccess::QUERY_STATUS,
+        )
         .context("サービス 'kenji' が見つかりません")?;
     service.delete().context("サービスの削除に失敗")?;
     println!("サービス 'kenji' を削除しました（実行中の場合は先に `sc stop kenji` してください）");

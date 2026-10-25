@@ -34,6 +34,7 @@ percent-encoding = "2"
 walkdir = "2"
 nvml-wrapper = "0.10"
 ureq = { version = "2", features = ["json"] }
+tower-http = { version = "0.6", features = ["catch-panic"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"

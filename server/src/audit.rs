@@ -49,7 +49,7 @@ impl Audit {
     }
 
     fn append(&self, entry: &AuditEntry) -> Result<()> {
-        let _g = self.lock.lock().unwrap();
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let path = self.path();
         if let Ok(meta) = std::fs::metadata(&path) {
             if meta.len() > ROTATE_BYTES {
@@ -60,14 +60,17 @@ impl Audit {
         }
         let mut line = serde_json::to_string(entry)?;
         line.push('\n');
-        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
         f.write_all(line.as_bytes())?;
         Ok(())
     }
 
     /// Newest-first list of up to `limit` entries.
     pub fn tail(&self, limit: usize) -> Vec<AuditEntry> {
-        let _g = self.lock.lock().unwrap();
+        let _g = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut entries: Vec<AuditEntry> = Vec::new();
         for path in [self.dir.join("audit.jsonl.1"), self.path()] {
             if !path.exists() {
@@ -81,7 +84,7 @@ impl Audit {
                 }
             }
         }
-        entries.sort_by(|a, b| b.ts.cmp(&a.ts));
+        entries.sort_by_key(|a| std::cmp::Reverse(a.ts));
         entries.truncate(limit);
         entries
     }

@@ -50,7 +50,10 @@ pub fn safe_file_name(name: &str) -> Result<String> {
         return Err(anyhow!("invalid file name"));
     }
     // Reject reserved Windows characters
-    if name.chars().any(|c| matches!(c, '<' | '>' | '"' | '|' | '?' | '*' | '\0')) {
+    if name
+        .chars()
+        .any(|c| matches!(c, '<' | '>' | '"' | '|' | '?' | '*' | '\0'))
+    {
         return Err(anyhow!("invalid file name"));
     }
     Ok(name.to_string())

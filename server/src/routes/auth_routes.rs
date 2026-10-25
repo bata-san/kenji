@@ -29,8 +29,11 @@ pub async fn login(
 
     match result {
         Some(ctx) => {
-            state.audit.log(&ctx.username, role_str(&ctx.role), "login", "");
-            let (token, exp) = issue_jwt(&ctx.username, ctx.role, &secret).map_err(ApiError::from)?;
+            state
+                .audit
+                .log(&ctx.username, role_str(&ctx.role), "login", "");
+            let (token, exp) =
+                issue_jwt(&ctx.username, ctx.role, &secret).map_err(ApiError::from)?;
             Ok(Json(serde_json::json!({
                 "token": token,
                 "username": ctx.username,
@@ -39,13 +42,21 @@ pub async fn login(
             })))
         }
         None => {
-            state.audit.log(&body.username, "unknown", "login_failed", &addr.ip().to_string());
+            state.audit.log(
+                &body.username,
+                "unknown",
+                "login_failed",
+                &addr.ip().to_string(),
+            );
             Err(ApiError::Unauthorized)
         }
     }
 }
 
-pub async fn me(State(_state): State<SharedState>, ctx: AuthCtx) -> ApiResult<Json<serde_json::Value>> {
+pub async fn me(
+    State(_state): State<SharedState>,
+    ctx: AuthCtx,
+) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(serde_json::json!({
         "username": ctx.username,
         "role": ctx.role,
@@ -88,14 +99,17 @@ pub async fn create_key(
     ctx.require(Role::Admin)?;
     let name = body.name.trim();
     if name.is_empty() || name.len() > 64 {
-        return Err(ApiError::BadRequest("名前は1〜64文字で指定してください".into()));
+        return Err(ApiError::BadRequest(
+            "名前は1〜64文字で指定してください".into(),
+        ));
     }
-    let role = Role::parse(&body.role).ok_or(ApiError::BadRequest("ロールは viewer / operator / admin で指定してください".into()))?;
-    let (rec, key) = state
-        .auth
-        .create_key(name, role)
-        .map_err(ApiError::from)?;
-    state.audit.log(&ctx.username, role_str(&ctx.role), "key_create", name);
+    let role = Role::parse(&body.role).ok_or(ApiError::BadRequest(
+        "ロールは viewer / operator / admin で指定してください".into(),
+    ))?;
+    let (rec, key) = state.auth.create_key(name, role).map_err(ApiError::from)?;
+    state
+        .audit
+        .log(&ctx.username, role_str(&ctx.role), "key_create", name);
     Ok(Json(serde_json::json!({
         "id": rec.id,
         "name": rec.name,
@@ -114,6 +128,8 @@ pub async fn delete_key(
     if !removed {
         return Err(ApiError::NotFound);
     }
-    state.audit.log(&ctx.username, role_str(&ctx.role), "key_delete", &id);
+    state
+        .audit
+        .log(&ctx.username, role_str(&ctx.role), "key_delete", &id);
     Ok((StatusCode::OK, Json(serde_json::json!({"ok": true}))))
 }

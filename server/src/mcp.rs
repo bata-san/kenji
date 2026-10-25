@@ -55,7 +55,13 @@ impl Api {
         percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
     }
 
-    fn request(&self, method: &str, path: &str, query: &str, body: Option<Value>) -> Result<Value, ToolError> {
+    fn request(
+        &self,
+        method: &str,
+        path: &str,
+        query: &str,
+        body: Option<Value>,
+    ) -> Result<Value, ToolError> {
         let url = format!("{}{}", self.base, Self::q(path, query));
         let mut req = match method {
             "GET" => ureq::get(&url),
@@ -73,7 +79,7 @@ impl Api {
         match resp {
             Ok(r) => {
                 if r.status() >= 200 && r.status() < 300 {
-                    r.into_json().or_else(|_| Ok(Value::Null))
+                    r.into_json().or(Ok(Value::Null))
                 } else {
                     Err(ToolError::msg(format!("HTTP {}", r.status())))
                 }
@@ -105,10 +111,20 @@ impl Api {
 
     /// Download a file as (lossy) UTF-8 text.
     fn download_text(&self, path: &str, max_bytes: usize) -> Result<String, ToolError> {
-        let url = format!("{}/api/files/download?path={}&token={}", self.base, Self::enc(path), Self::enc(&self.token));
-        let resp = ureq::get(&url).call().map_err(|e| ToolError::msg(format!("download failed: {e}")))?;
+        let url = format!(
+            "{}/api/files/download?path={}&token={}",
+            self.base,
+            Self::enc(path),
+            Self::enc(&self.token)
+        );
+        let resp = ureq::get(&url)
+            .call()
+            .map_err(|e| ToolError::msg(format!("download failed: {e}")))?;
         let mut buf = Vec::new();
-        resp.into_reader().take(max_bytes as u64 + 1).read_to_end(&mut buf).map_err(|e| ToolError::msg(format!("read failed: {e}")))?;
+        resp.into_reader()
+            .take(max_bytes as u64 + 1)
+            .read_to_end(&mut buf)
+            .map_err(|e| ToolError::msg(format!("read failed: {e}")))?;
         let truncated = buf.len() > max_bytes;
         if truncated {
             buf.truncate(max_bytes);
@@ -136,9 +152,12 @@ impl Api {
 
         let req = ureq::post(&url)
             .set("Authorization", &format!("Bearer {}", self.token))
-            .set("Content-Type", &format!("multipart/form-data; boundary={boundary}"));
+            .set(
+                "Content-Type",
+                &format!("multipart/form-data; boundary={boundary}"),
+            );
         match req.send_bytes(&body) {
-            Ok(r) => r.into_json().or_else(|_| Ok(Value::Null)),
+            Ok(r) => r.into_json().or(Ok(Value::Null)),
             Err(ureq::Error::Status(code, r)) => {
                 let msg = r
                     .into_string()
@@ -398,31 +417,45 @@ fn h_job_run(api: &Api, p: &Value) -> Result<ToolOutput, ToolError> {
 
 fn h_job_start(api: &Api, p: &Value) -> Result<ToolOutput, ToolError> {
     let id = need_str(p, "id")?;
-    Ok(ToolOutput::Json(api.post(&format!("/api/jobs/{id}/start"), json!({}))?))
+    Ok(ToolOutput::Json(
+        api.post(&format!("/api/jobs/{id}/start"), json!({}))?,
+    ))
 }
 
 fn h_job_stop(api: &Api, p: &Value) -> Result<ToolOutput, ToolError> {
     let id = need_str(p, "id")?;
-    Ok(ToolOutput::Json(api.post(&format!("/api/jobs/{id}/stop"), json!({}))?))
+    Ok(ToolOutput::Json(
+        api.post(&format!("/api/jobs/{id}/stop"), json!({}))?,
+    ))
 }
 
 fn h_job_delete(api: &Api, p: &Value) -> Result<ToolOutput, ToolError> {
     let id = need_str(p, "id")?;
-    Ok(ToolOutput::Json(api.delete(&format!("/api/jobs/{id}"), "")?))
+    Ok(ToolOutput::Json(
+        api.delete(&format!("/api/jobs/{id}"), "")?,
+    ))
 }
 
 fn h_job_logs(api: &Api, p: &Value) -> Result<ToolOutput, ToolError> {
     let id = need_str(p, "id")?;
-    let max = p["max_bytes"].as_u64().unwrap_or(32 * 1024).min(1024 * 1024);
+    let max = p["max_bytes"]
+        .as_u64()
+        .unwrap_or(32 * 1024)
+        .min(1024 * 1024);
     let v = api.get(&format!("/api/jobs/{id}/logs"), &format!("max_bytes={max}"))?;
-    Ok(ToolOutput::Text(v["content"].as_str().unwrap_or("").to_string()))
+    Ok(ToolOutput::Text(
+        v["content"].as_str().unwrap_or("").to_string(),
+    ))
 }
 
 fn h_run_command(api: &Api, p: &Value) -> Result<ToolOutput, ToolError> {
     let command = need_str(p, "command")?;
     let shell = p["shell"].as_bool().unwrap_or(true);
     let timeout_secs = p["timeout_seconds"].as_u64().unwrap_or(120).min(600);
-    let max_out = p["max_output_bytes"].as_u64().unwrap_or(32 * 1024).min(256 * 1024) as usize;
+    let max_out = p["max_output_bytes"]
+        .as_u64()
+        .unwrap_or(32 * 1024)
+        .min(256 * 1024) as usize;
     let keep = p["keep_job"].as_bool().unwrap_or(false);
 
     let (cmd, args) = if shell {
@@ -433,17 +466,27 @@ fn h_run_command(api: &Api, p: &Value) -> Result<ToolOutput, ToolError> {
     } else {
         let args: Vec<String> = p["args"]
             .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         (command.clone(), args)
     };
 
-    let name = format!("mcp-run-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+    let name = format!(
+        "mcp-run-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..12]
+    );
     let job = api.post(
         "/api/jobs",
         json!({ "name": name, "command": cmd, "args": args, "description": "MCP run_command", "restart_policy": "never" }),
     )?;
-    let id = job["id"].as_str().ok_or_else(|| ToolError::msg("no job id in response"))?.to_string();
+    let id = job["id"]
+        .as_str()
+        .ok_or_else(|| ToolError::msg("no job id in response"))?
+        .to_string();
 
     let started = std::time::Instant::now();
     let mut timed_out = false;
@@ -463,10 +506,16 @@ fn h_run_command(api: &Api, p: &Value) -> Result<ToolOutput, ToolError> {
         }
     }
 
-    let logs = api.get(&format!("/api/jobs/{id}/logs"), &format!("max_bytes={max_out}"))?;
+    let logs = api.get(
+        &format!("/api/jobs/{id}/logs"),
+        &format!("max_bytes={max_out}"),
+    )?;
     let logs_text = logs["content"].as_str().unwrap_or("").to_string();
     let final_v = api.get(&format!("/api/jobs/{id}"), "").ok();
-    let final_job = final_v.as_ref().map(|v| v["job"].clone()).unwrap_or(Value::Null);
+    let final_job = final_v
+        .as_ref()
+        .map(|v| v["job"].clone())
+        .unwrap_or(Value::Null);
     if !keep {
         let _ = api.delete(&format!("/api/jobs/{id}"), "");
     }
@@ -480,7 +529,7 @@ fn h_run_command(api: &Api, p: &Value) -> Result<ToolOutput, ToolError> {
     if let Some(e) = final_job["last_error"].as_str() {
         out.push_str(&format!("error: {e}\n"));
     }
-    out.push_str(&format!("exit_code: {}\n", final_job["exit_code"].to_string()));
+    out.push_str(&format!("exit_code: {}\n", final_job["exit_code"]));
     out.push_str("--- output ---\n");
     out.push_str(&logs_text);
     Ok(ToolOutput::Text(out))
@@ -488,12 +537,18 @@ fn h_run_command(api: &Api, p: &Value) -> Result<ToolOutput, ToolError> {
 
 fn h_files_list(api: &Api, p: &Value) -> Result<ToolOutput, ToolError> {
     let path = p["path"].as_str().unwrap_or("/");
-    Ok(ToolOutput::Json(api.get("/api/files/list", &format!("path={}", Api::enc(path)))?))
+    Ok(ToolOutput::Json(api.get(
+        "/api/files/list",
+        &format!("path={}", Api::enc(path)),
+    )?))
 }
 
 fn h_file_read(api: &Api, p: &Value) -> Result<ToolOutput, ToolError> {
     let path = need_str(p, "path")?;
-    let max = p["max_bytes"].as_u64().unwrap_or(64 * 1024).min(1024 * 1024) as usize;
+    let max = p["max_bytes"]
+        .as_u64()
+        .unwrap_or(64 * 1024)
+        .min(1024 * 1024) as usize;
     Ok(ToolOutput::Text(api.download_text(&path, max)?))
 }
 
@@ -523,23 +578,33 @@ fn split_path(path: &str) -> Result<(String, String), ToolError> {
 
 fn h_file_mkdir(api: &Api, p: &Value) -> Result<ToolOutput, ToolError> {
     let path = need_str(p, "path")?;
-    Ok(ToolOutput::Json(api.post("/api/files/mkdir", json!({ "path": path }))?))
+    Ok(ToolOutput::Json(
+        api.post("/api/files/mkdir", json!({ "path": path }))?,
+    ))
 }
 
 fn h_file_move(api: &Api, p: &Value) -> Result<ToolOutput, ToolError> {
     let from = need_str(p, "from")?;
     let to = need_str(p, "to")?;
-    Ok(ToolOutput::Json(api.post("/api/files/move", json!({ "from": from, "to": to }))?))
+    Ok(ToolOutput::Json(api.post(
+        "/api/files/move",
+        json!({ "from": from, "to": to }),
+    )?))
 }
 
 fn h_file_delete(api: &Api, p: &Value) -> Result<ToolOutput, ToolError> {
     let path = need_str(p, "path")?;
-    Ok(ToolOutput::Json(api.delete("/api/files/delete", &format!("path={}", Api::enc(&path)))?))
+    Ok(ToolOutput::Json(api.delete(
+        "/api/files/delete",
+        &format!("path={}", Api::enc(&path)),
+    )?))
 }
 
 fn h_audit_list(api: &Api, p: &Value) -> Result<ToolOutput, ToolError> {
     let limit = p["limit"].as_u64().unwrap_or(100).min(2000);
-    Ok(ToolOutput::Json(api.get("/api/audit", &format!("limit={limit}"))?))
+    Ok(ToolOutput::Json(
+        api.get("/api/audit", &format!("limit={limit}"))?,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -577,7 +642,7 @@ fn dispatch(api: &Api, msg: &Value) -> Option<Value> {
     let id = msg.get("id").cloned();
 
     // notifications (no id) get no response
-    let Some(id) = id else { return None };
+    let id = id?;
 
     let result = match method {
         "initialize" => Some(initialize_result(msg["params"]["protocolVersion"].as_str())),
@@ -591,7 +656,11 @@ fn dispatch(api: &Api, msg: &Value) -> Option<Value> {
 
     match result {
         Some(r) => Some(ok_result(id, r)),
-        None => Some(err_result(id, -32601, &format!("method not found: {method}"))),
+        None => Some(err_result(
+            id,
+            -32601,
+            &format!("method not found: {method}"),
+        )),
     }
 }
 
@@ -670,7 +739,12 @@ mod tests {
 
         let list = json!({"jsonrpc":"2.0","id":2,"method":"tools/list"});
         let resp = dispatch(&api, &list).unwrap();
-        let names: Vec<&str> = resp["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        let names: Vec<&str> = resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
         assert!(names.contains(&"run_command"));
         assert!(names.contains(&"file_write"));
         assert!(names.len() >= 12);
@@ -686,8 +760,14 @@ mod tests {
 
     #[test]
     fn split_path_rules() {
-        assert_eq!(split_path("/a/b.txt").unwrap(), ("/a".to_string(), "b.txt".to_string()));
-        assert_eq!(split_path("/b.txt").unwrap(), ("/".to_string(), "b.txt".to_string()));
+        assert_eq!(
+            split_path("/a/b.txt").unwrap(),
+            ("/a".to_string(), "b.txt".to_string())
+        );
+        assert_eq!(
+            split_path("/b.txt").unwrap(),
+            ("/".to_string(), "b.txt".to_string())
+        );
         assert!(split_path("/a/../c.txt").is_err());
     }
 }

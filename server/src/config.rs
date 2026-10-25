@@ -57,8 +57,10 @@ impl Config {
     pub fn load(data_dir: &Path) -> Result<Config> {
         let p = Self::path(data_dir);
         if p.exists() {
-            let raw = std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?;
-            let mut cfg: Config = serde_json::from_str(&raw).with_context(|| format!("parsing {}", p.display()))?;
+            let raw =
+                std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?;
+            let mut cfg: Config =
+                serde_json::from_str(&raw).with_context(|| format!("parsing {}", p.display()))?;
             cfg.data_dir = data_dir.to_path_buf();
             Ok(cfg)
         } else {

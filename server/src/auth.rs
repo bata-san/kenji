@@ -79,7 +79,8 @@ pub struct AuthStore {
 
 impl AuthStore {
     pub fn load(path: &Path) -> Result<AuthStore> {
-        let raw = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let raw =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let data: AuthData = serde_json::from_str(&raw).context("parsing auth.json")?;
         Ok(AuthStore {
             path: path.to_path_buf(),
@@ -89,7 +90,12 @@ impl AuthStore {
         })
     }
 
-    pub fn create(path: &Path, username: &str, password: &str, jwt_secret: &str) -> Result<AuthStore> {
+    pub fn create(
+        path: &Path,
+        username: &str,
+        password: &str,
+        jwt_secret: &str,
+    ) -> Result<AuthStore> {
         let hash = hash_password(password)?;
         let data = AuthData {
             admin_username: username.to_string(),
@@ -109,14 +115,18 @@ impl AuthStore {
 
     /// JWT signing secret (lives in auth.json; generated at setup).
     pub fn jwt_secret(&self) -> String {
-        self.data.lock().unwrap().jwt_secret.clone()
+        self.data
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .jwt_secret
+            .clone()
     }
 
     /// Verify admin credentials. Returns auth context on success.
     /// `who` is an identifier for lockout tracking (username + client ip).
     pub fn login(&self, username: &str, password: &str, who: &str) -> Result<Option<AuthContext>> {
         {
-            let l = self.lockouts.lock().unwrap();
+            let l = self.lockouts.lock().unwrap_or_else(|e| e.into_inner());
             if let Some((_, Some(until))) = l.fails.get(who) {
                 if Instant::now() < *until {
                     return Ok(None); // still locked out
@@ -125,20 +135,31 @@ impl AuthStore {
         }
 
         let (user_ok, pass_ok) = {
-            let data = self.data.lock().unwrap();
+            let data = self.data.lock().unwrap_or_else(|e| e.into_inner());
             let user_ok = data.admin_username == username;
             let parsed = PasswordHash::new(&data.admin_password_hash).ok();
             let pass_ok = parsed
-                .map(|h| Argon2::default().verify_password(password.as_bytes(), &h).is_ok())
+                .map(|h| {
+                    Argon2::default()
+                        .verify_password(password.as_bytes(), &h)
+                        .is_ok()
+                })
                 .unwrap_or(false);
             (user_ok, pass_ok)
         };
 
         if user_ok && pass_ok {
-            self.lockouts.lock().unwrap().fails.remove(who);
-            Ok(Some(AuthContext { username: username.to_string(), role: Role::Admin }))
+            self.lockouts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .fails
+                .remove(who);
+            Ok(Some(AuthContext {
+                username: username.to_string(),
+                role: Role::Admin,
+            }))
         } else {
-            let mut l = self.lockouts.lock().unwrap();
+            let mut l = self.lockouts.lock().unwrap_or_else(|e| e.into_inner());
             let entry = l.fails.entry(who.to_string()).or_insert((0, None));
             entry.0 += 1;
             if entry.0 >= MAX_FAILS {
@@ -153,7 +174,7 @@ impl AuthStore {
     pub fn authenticate(&self, token: &str, jwt_secret: &str) -> Option<AuthContext> {
         if token.starts_with("kjk_") {
             let hash = hex::encode(Sha256::digest(token.as_bytes()));
-            let mut data = self.data.lock().unwrap();
+            let mut data = self.data.lock().unwrap_or_else(|e| e.into_inner());
             for k in data.keys.iter_mut() {
                 if constant_time_eq(k.key_hash.as_bytes(), hash.as_bytes()) {
                     k.last_used_at = Some(Utc::now());
@@ -170,7 +191,11 @@ impl AuthStore {
     }
 
     pub fn create_key(&self, name: &str, role: Role) -> Result<(ApiKeyRecord, String)> {
-        let secret: String = rand::thread_rng().sample_iter(&Alphanumeric).take(40).map(char::from).collect();
+        let secret: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(40)
+            .map(char::from)
+            .collect();
         let full = format!("kjk_{secret}");
         let rec = ApiKeyRecord {
             id: uuid::Uuid::new_v4().to_string(),
@@ -181,7 +206,7 @@ impl AuthStore {
             last_used_at: None,
         };
         {
-            let mut data = self.data.lock().unwrap();
+            let mut data = self.data.lock().unwrap_or_else(|e| e.into_inner());
             data.keys.push(rec.clone());
             self.dirty.store(true, Ordering::Relaxed);
         }
@@ -191,7 +216,7 @@ impl AuthStore {
 
     pub fn delete_key(&self, id: &str) -> Result<bool> {
         let removed = {
-            let mut data = self.data.lock().unwrap();
+            let mut data = self.data.lock().unwrap_or_else(|e| e.into_inner());
             let before = data.keys.len();
             data.keys.retain(|k| k.id != id);
             let removed = data.keys.len() != before;
@@ -207,12 +232,16 @@ impl AuthStore {
     }
 
     pub fn list_keys(&self) -> Vec<ApiKeyRecord> {
-        self.data.lock().unwrap().keys.clone()
+        self.data
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys
+            .clone()
     }
 
     pub fn flush(&self) -> Result<()> {
         let raw = {
-            let data = self.data.lock().unwrap();
+            let data = self.data.lock().unwrap_or_else(|e| e.into_inner());
             serde_json::to_string_pretty(&*data)?
         };
         let tmp = self.path.with_extension("json.tmp");

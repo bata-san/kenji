@@ -61,11 +61,19 @@ pub struct RestartMode {
 impl RestartMode {
     #[allow(dead_code)] // Windowsサービス以外のターゲットでは未使用
     pub fn service() -> RestartMode {
-        RestartMode { service: true, relaunch_args: vec![], wait_pid: 0 }
+        RestartMode {
+            service: true,
+            relaunch_args: vec![],
+            wait_pid: 0,
+        }
     }
 
     pub fn foreground(relaunch_args: Vec<String>) -> RestartMode {
-        RestartMode { service: false, relaunch_args, wait_pid: std::process::id() }
+        RestartMode {
+            service: false,
+            relaunch_args,
+            wait_pid: std::process::id(),
+        }
     }
 }
 
@@ -111,7 +119,7 @@ impl UpdateManager {
     }
 
     fn set(&self, f: impl FnOnce(&mut Inner)) {
-        let mut i = self.inner.lock().unwrap();
+        let mut i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         f(&mut i);
     }
 
@@ -133,7 +141,7 @@ impl UpdateManager {
     /// JSON snapshot for the API/UI. `available` is true only when the latest
     /// release is strictly newer than the running version.
     pub fn snapshot(&self, cfg: &UpdateConfig) -> Value {
-        let i = self.inner.lock().unwrap();
+        let i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let available = i
             .latest
             .as_ref()
@@ -172,7 +180,8 @@ impl UpdateManager {
         });
         let url = format!("{}/repos/{}/releases/latest", self.api_base, repo);
         let version = self.current_version.clone();
-        let res = tokio::task::spawn_blocking(move || fetch_latest(&url, &version)).await
+        let res = tokio::task::spawn_blocking(move || fetch_latest(&url, &version))
+            .await
             .map_err(|e| format!("更新確認タスクが失敗: {e}"))?;
         match res {
             Ok(latest) => {
@@ -196,35 +205,39 @@ impl UpdateManager {
     /// Download the latest release, verify its SHA256, hot-swap the binary and
     /// hand over to the finalize helper, then trigger a graceful shutdown.
     pub async fn install(self: &Arc<Self>) -> Result<(), String> {
-        {
-            let i = self.inner.lock().unwrap();
-            if !matches!(
-                i.status,
-                UpdateStatus::Idle | UpdateStatus::Failed
-            ) {
-                return Err("アップデート処理がすでに進行中です".into());
+        // ステータスを Idle→Downloading へ原子的に遷移させて二重実行を防ぐ
+        let release = {
+            let mut i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            match i.status {
+                UpdateStatus::Idle | UpdateStatus::Failed => {}
+                _ => return Err("アップデート処理がすでに進行中です".into()),
             }
-            if i.latest.is_none() {
-                return Err("利用可能なアップデート情報がありません。先に確認を実行してください。".into());
-            }
-        }
-        let release = self.inner.lock().unwrap().latest.clone().unwrap();
+            let Some(rel) = i.latest.clone() else {
+                return Err(
+                    "利用可能なアップデート情報がありません。先に確認を実行してください。".into(),
+                );
+            };
+            i.status = UpdateStatus::Downloading;
+            rel
+        };
         if !matches!(
             compare_versions(&release.version, &self.current_version),
             std::cmp::Ordering::Greater
         ) {
+            self.set(|i| i.status = UpdateStatus::Idle);
             return Err("新バージョンはありません".into());
         }
 
         let staging = self.staging_path();
         if let Some(dir) = staging.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| format!("updates ディレクトリ作成に失敗: {e}"))?;
+            std::fs::create_dir_all(dir)
+                .map_err(|e| format!("updates ディレクトリ作成に失敗: {e}"))?;
         }
-        self.set(|i| i.status = UpdateStatus::Downloading);
         let r = {
             let release = release.clone();
             let staging = staging.clone();
-            tokio::task::spawn_blocking(move || download_and_verify(&release, &staging)).await
+            tokio::task::spawn_blocking(move || download_and_verify(&release, &staging))
+                .await
                 .map_err(|e| format!("ダウンロードタスクが失敗: {e}"))?
         };
         if let Err(e) = r {
@@ -239,11 +252,15 @@ impl UpdateManager {
         // download_and_verify already verified; the split exists for UI clarity.
 
         self.set(|i| i.status = UpdateStatus::Installing);
-        let exe = std::env::current_exe().map_err(|e| format!("実行ファイルのパス取得に失敗: {e}"))?;
+        let exe =
+            std::env::current_exe().map_err(|e| format!("実行ファイルのパス取得に失敗: {e}"))?;
         let restart = self.restart.clone();
         let data_dir = self.data_dir.clone();
-        let r = tokio::task::spawn_blocking(move || apply_and_hand_over(&exe, &staging, &restart, &data_dir)).await
-            .map_err(|e| format!("適用タスクが失敗: {e}"))?;
+        let r = tokio::task::spawn_blocking(move || {
+            apply_and_hand_over(&exe, &staging, &restart, &data_dir)
+        })
+        .await
+        .map_err(|e| format!("適用タスクが失敗: {e}"))?;
         if let Err(e) = r {
             self.set(|i| {
                 i.status = UpdateStatus::Failed;
@@ -267,7 +284,10 @@ pub fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
     let mut nums = [0u64; 3];
     let mut count = 0;
     for seg in v.split('.') {
-        let numeric = seg.split(|c: char| !c.is_ascii_digit()).next().unwrap_or("");
+        let numeric = seg
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .unwrap_or("");
         if numeric.is_empty() {
             return None;
         }
@@ -304,12 +324,24 @@ pub fn parse_release(v: &Value) -> Option<Release> {
     let version = tag.trim_start_matches('v').to_string();
     parse_version(&version)?;
     let assets = &v["assets"];
-    let exe_name = EXE_ASSET_NAMES.iter().find(|n| asset_by_name(assets, n).is_some())?;
-    let exe_url = asset_by_name(assets, exe_name)?["browser_download_url"].as_str()?.to_string();
+    let exe_name = EXE_ASSET_NAMES
+        .iter()
+        .find(|n| asset_by_name(assets, n).is_some())?;
+    let exe_url = asset_by_name(assets, exe_name)?["browser_download_url"]
+        .as_str()?
+        .to_string();
     let sha_name = format!("{exe_name}.sha256");
-    let sha_url = asset_by_name(assets, &sha_name)?["browser_download_url"].as_str()?.to_string();
+    let sha_url = asset_by_name(assets, &sha_name)?["browser_download_url"]
+        .as_str()?
+        .to_string();
     let notes_url = v["html_url"].as_str().unwrap_or_default().to_string();
-    Some(Release { tag: tag.to_string(), version, notes_url, exe_url, sha_url })
+    Some(Release {
+        tag: tag.to_string(),
+        version,
+        notes_url,
+        exe_url,
+        sha_url,
+    })
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
@@ -317,7 +349,9 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     loop {
-        let n = f.read(&mut buf).map_err(|e| format!("ファイル読み込み失敗: {e}"))?;
+        let n = f
+            .read(&mut buf)
+            .map_err(|e| format!("ファイル読み込み失敗: {e}"))?;
         if n == 0 {
             break;
         }
@@ -335,9 +369,12 @@ fn fetch_latest(url: &str, version: &str) -> Result<Option<Release>, String> {
         .call();
     match resp {
         Ok(r) => {
-            let v: Value = r.into_json().map_err(|e| format!("GitHub 応答の解析に失敗: {e}"))?;
-            let release = parse_release(&v)
-                .ok_or_else(|| "リリースにWindows用バイナリとチェックサムがありません".to_string())?;
+            let v: Value = r
+                .into_json()
+                .map_err(|e| format!("GitHub 応答の解析に失敗: {e}"))?;
+            let release = parse_release(&v).ok_or_else(|| {
+                "リリースにWindows用バイナリとチェックサムがありません".to_string()
+            })?;
             Ok(Some(release))
         }
         Err(ureq::Error::Status(404, _)) => Ok(None),
@@ -368,7 +405,8 @@ fn download_and_verify_impl(release: &Release, dest: &Path, tmp: &Path) -> Resul
         .call()
         .map_err(|e| format!("ダウンロードに失敗: {e}"))?;
     {
-        let mut out = std::fs::File::create(tmp).map_err(|e| format!("書き込み先の作成に失敗: {e}"))?;
+        let mut out =
+            std::fs::File::create(tmp).map_err(|e| format!("書き込み先の作成に失敗: {e}"))?;
         let mut reader = resp.into_reader().take(MAX_EXE_BYTES + 1);
         std::io::copy(&mut reader, &mut out).map_err(|e| format!("ダウンロード中のエラー: {e}"))?;
     }
@@ -381,7 +419,9 @@ fn download_and_verify_impl(release: &Release, dest: &Path, tmp: &Path) -> Resul
         .timeout(Duration::from_secs(20))
         .call()
     {
-        Ok(r) => r.into_string().map_err(|e| format!("チェックサムの読み取りに失敗: {e}"))?,
+        Ok(r) => r
+            .into_string()
+            .map_err(|e| format!("チェックサムの読み取りに失敗: {e}"))?,
         Err(e) => return Err(format!("チェックサムの取得に失敗: {e}")),
     };
     let expected = expected
@@ -411,7 +451,13 @@ fn swap_files(exe: &Path, staged: &Path) -> Result<(), String> {
     let _ = std::fs::remove_file(&old);
     std::fs::rename(exe, &old).map_err(|e| format!("実行バイナリの退避に失敗: {e}"))?;
     match std::fs::copy(staged, exe) {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            // ディスクへフラッシュ（電源断・クラッシュ時に exe が中途半端にならないように）
+            if let Ok(f) = std::fs::File::open(exe) {
+                let _ = f.sync_all();
+            }
+            Ok(())
+        }
         Err(e) => {
             // Try to restore the original so the next boot still works.
             let _ = std::fs::rename(&old, exe);
@@ -433,12 +479,19 @@ fn spawn_detached(exe: &Path, args: &[String]) -> Result<(), String> {
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    cmd.spawn().map(|_| ()).map_err(|e| format!("ヘルパー起動に失敗: {e}"))
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| format!("ヘルパー起動に失敗: {e}"))
 }
 
 /// Swap the binary, then spawn the detached finalize helper. Does NOT shut
 /// anything down — the caller triggers the graceful shutdown afterwards.
-fn apply_and_hand_over(exe: &Path, staged: &Path, restart: &RestartMode, data_dir: &Path) -> Result<(), String> {
+fn apply_and_hand_over(
+    exe: &Path,
+    staged: &Path,
+    restart: &RestartMode,
+    data_dir: &Path,
+) -> Result<(), String> {
     swap_files(exe, staged)?;
     let mut args: Vec<String> = vec![
         "update-finalize".into(),
@@ -453,7 +506,7 @@ fn apply_and_hand_over(exe: &Path, staged: &Path, restart: &RestartMode, data_di
         args.extend(restart.relaunch_args.iter().cloned());
     }
     spawn_detached(exe, &args)
-        .map_err(|e| format!("再起動ヘルパーの起動に失敗（古いバイナリで動作継続中）: {e}"))
+        .map_err(|e| format!("再起動ヘルパーの起動に失敗（現行プロセスは継続し、次回起動から新バイナリになります）: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -463,7 +516,11 @@ fn apply_and_hand_over(exe: &Path, staged: &Path, restart: &RestartMode, data_di
 fn finalize_log(data_dir: &Path, msg: &str) {
     let dir = data_dir.join("updates");
     let _ = std::fs::create_dir_all(&dir);
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("finalize.log")) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("finalize.log"))
+    {
         let _ = f.write_all(format!("[{}] {msg}\n", Utc::now().to_rfc3339()).as_bytes());
     }
 }
@@ -497,14 +554,16 @@ fn pid_alive(pid: u32) -> bool {
 fn service_stopped() -> bool {
     use windows_service::service::ServiceAccess;
     use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
-    let manager = match ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT) {
+    let manager = match ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+    {
         Ok(m) => m,
         Err(_) => return false,
     };
-    let service = match manager.open_service(crate::service::SERVICE_NAME, ServiceAccess::QUERY_STATUS) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
+    let service =
+        match manager.open_service(crate::service::SERVICE_NAME, ServiceAccess::QUERY_STATUS) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
     matches!(
         service.query_status().map(|s| s.current_state),
         Ok(windows_service::service::ServiceState::Stopped)
@@ -519,13 +578,28 @@ fn start_service() -> Result<(), String> {
         .map_err(|e| format!("SCMへの接続に失敗: {e}"))?;
     let service = manager
         .open_service(crate::service::SERVICE_NAME, ServiceAccess::START)
-        .map_err(|e| format!("サービス'{}'を開けません: {e}", crate::service::SERVICE_NAME))?;
-    service.start::<&str>(&[]).map_err(|e| format!("サービスの開始に失敗: {e}"))
+        .map_err(|e| {
+            format!(
+                "サービス'{}'を開けません: {e}",
+                crate::service::SERVICE_NAME
+            )
+        })?;
+    service
+        .start::<&str>(&[])
+        .map_err(|e| format!("サービスの開始に失敗: {e}"))
 }
 
 /// Entry point of the hidden `kenji update-finalize` subcommand.
-pub fn finalize(data_dir: PathBuf, wait_pid: Option<u32>, service: bool, relaunch: Vec<String>) -> i32 {
-    finalize_log(&data_dir, &format!("finalize開始 (wait_pid={wait_pid:?}, service={service}, relaunch={relaunch:?})"));
+pub fn finalize(
+    data_dir: PathBuf,
+    wait_pid: Option<u32>,
+    service: bool,
+    relaunch: Vec<String>,
+) -> i32 {
+    finalize_log(
+        &data_dir,
+        &format!("finalize開始 (wait_pid={wait_pid:?}, service={service}, relaunch={relaunch:?})"),
+    );
     let deadline = std::time::Instant::now() + Duration::from_secs(FINALIZE_TIMEOUT_SECS);
     loop {
         if service {
@@ -547,8 +621,11 @@ pub fn finalize(data_dir: PathBuf, wait_pid: Option<u32>, service: bool, relaunc
             break;
         }
         if std::time::Instant::now() >= deadline {
-            finalize_log(&data_dir, "タイムアウト: 前プロセスの停止を確認できませんでした");
-            return 1;
+            finalize_log(
+                &data_dir,
+                "タイムアウト: 前プロセスの停止を確認できませんでした。念のため再起動を試みます",
+            );
+            break;
         }
         std::thread::sleep(Duration::from_millis(500));
     }
@@ -608,9 +685,18 @@ mod tests {
         assert_eq!(parse_version("10.20.30.40"), Some((10, 20, 30))); // 4th segment ignored
         assert_eq!(parse_version(""), None);
         assert_eq!(parse_version("dev"), None);
-        assert_eq!(compare_versions("0.2.0", "0.1.9"), std::cmp::Ordering::Greater);
-        assert_eq!(compare_versions("0.2.0", "0.2.0"), std::cmp::Ordering::Equal);
-        assert_eq!(compare_versions("0.2.0", "0.10.0"), std::cmp::Ordering::Less);
+        assert_eq!(
+            compare_versions("0.2.0", "0.1.9"),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            compare_versions("0.2.0", "0.2.0"),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(
+            compare_versions("0.2.0", "0.10.0"),
+            std::cmp::Ordering::Less
+        );
     }
 
     #[test]
@@ -670,7 +756,9 @@ mod tests {
     }
 
     /// Minimal HTTP server: serves a fixed map of path → (status, body).
-    fn serve(paths: Vec<(String, &'static [u8])>) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
+    fn serve(
+        paths: Vec<(String, &'static [u8])>,
+    ) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = std::thread::spawn(move || {
@@ -710,7 +798,10 @@ mod tests {
         // --- good checksum ---
         let (addr, _t) = serve(vec![
             ("/dl/kenji.exe".to_string(), exe_bytes),
-            ("/dl/kenji.exe.sha256".to_string(), Box::leak(sha_body.clone().into_boxed_slice())),
+            (
+                "/dl/kenji.exe.sha256".to_string(),
+                Box::leak(sha_body.clone().into_boxed_slice()),
+            ),
         ]);
         let base = format!("http://{addr}/dl");
         let release = Release {
@@ -728,7 +819,10 @@ mod tests {
         // --- checksum mismatch → error + no staged file ---
         let (addr2, _t2) = serve(vec![
             ("/dl/kenji.exe".to_string(), exe_bytes),
-            ("/dl/kenji.exe.sha256".to_string(), b"0000000000000000000000000000000000000000000000000000000000000000  kenji.exe\n"),
+            (
+                "/dl/kenji.exe.sha256".to_string(),
+                b"0000000000000000000000000000000000000000000000000000000000000000  kenji.exe\n",
+            ),
         ]);
         let base2 = format!("http://{addr2}/dl");
         let release2 = Release {

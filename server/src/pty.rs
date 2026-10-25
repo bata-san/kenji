@@ -15,16 +15,22 @@ pub struct TerminalManager {
 
 impl TerminalManager {
     pub fn new() -> TerminalManager {
-        TerminalManager { active: Arc::new(AtomicUsize::new(0)) }
+        TerminalManager {
+            active: Arc::new(AtomicUsize::new(0)),
+        }
     }
 
     pub fn try_acquire(&self) -> Result<SessionGuard> {
         let now = self.active.fetch_add(1, Ordering::SeqCst);
         if now >= MAX_TERMINAL_SESSIONS {
             self.active.fetch_sub(1, Ordering::SeqCst);
-            return Err(anyhow::anyhow!("同時ターミナルセッション数の上限に達しています"));
+            return Err(anyhow::anyhow!(
+                "同時ターミナルセッション数の上限に達しています"
+            ));
         }
-        Ok(SessionGuard { active: self.active.clone() })
+        Ok(SessionGuard {
+            active: self.active.clone(),
+        })
     }
 }
 
@@ -47,15 +53,29 @@ pub struct PtySession {
 
 impl PtySession {
     /// Open a PTY running the configured shell.
-    pub fn open(shell: &str, args: &[String], cwd: &std::path::Path, cols: u16, rows: u16) -> Result<PtySession> {
+    pub fn open(
+        shell: &str,
+        args: &[String],
+        cwd: &std::path::Path,
+        cols: u16,
+        rows: u16,
+    ) -> Result<PtySession> {
         let pty_system = native_pty_system();
         let pair = pty_system
-            .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .context("PTY を開けませんでした")?;
         let mut cmd = CommandBuilder::new(shell);
         cmd.args(args);
         cmd.cwd(cwd);
-        let child = pair.slave.spawn_command(cmd).context("シェルを起動できませんでした")?;
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .context("シェルを起動できませんでした")?;
         let reader = pair.master.try_clone_reader().context("PTY reader")?;
         let writer = pair.master.take_writer().context("PTY writer")?;
         let killer = child.clone_killer();

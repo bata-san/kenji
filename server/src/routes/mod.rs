@@ -16,6 +16,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::Router;
 use rust_embed::RustEmbed;
+use tower_http::catch_panic::CatchPanicLayer;
 
 use crate::auth::Role;
 use crate::error::{ApiError, ApiResult};
@@ -39,7 +40,10 @@ fn authenticate_token(state: &SharedState, token: &str) -> ApiResult<AuthCtx> {
     state
         .auth
         .authenticate(token, &secret)
-        .map(|ctx| AuthCtx { username: ctx.username, role: ctx.role })
+        .map(|ctx| AuthCtx {
+            username: ctx.username,
+            role: ctx.role,
+        })
         .ok_or(ApiError::Unauthorized)
 }
 
@@ -86,7 +90,11 @@ pub async fn static_handler(uri: Uri) -> Response {
         return ApiError::NotFound.into_response();
     }
     let trimmed = path.trim_start_matches('/');
-    let asset_path = if trimmed.is_empty() { "index.html" } else { trimmed };
+    let asset_path = if trimmed.is_empty() {
+        "index.html"
+    } else {
+        trimmed
+    };
     match WebAssets::get(asset_path) {
         Some(asset) => {
             let mime = mime_guess::from_path(asset_path).first_or_octet_stream();
@@ -98,9 +106,9 @@ pub async fn static_handler(uri: Uri) -> Response {
             } else {
                 builder.header(CACHE_CONTROL, "public, max-age=86400")
             };
-            builder
-                .body(Body::from(asset.data))
-                .unwrap_or_else(|_| ApiError::Internal(anyhow::anyhow!("body build")).into_response())
+            builder.body(Body::from(asset.data)).unwrap_or_else(|_| {
+                ApiError::Internal(anyhow::anyhow!("body build")).into_response()
+            })
         }
         None => {
             // Missing asset with a file extension → 404; otherwise SPA route → index.
@@ -129,11 +137,20 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/api/health", get(system_routes::health))
         .route("/api/auth/login", post(auth_routes::login))
         .route("/api/auth/me", get(auth_routes::me))
-        .route("/api/auth/keys", get(auth_routes::list_keys).post(auth_routes::create_key))
+        .route(
+            "/api/auth/keys",
+            get(auth_routes::list_keys).post(auth_routes::create_key),
+        )
         .route("/api/auth/keys/{id}", delete(auth_routes::delete_key))
         .route("/api/system/overview", get(system_routes::overview))
-        .route("/api/jobs", get(jobs_routes::list).post(jobs_routes::create))
-        .route("/api/jobs/{id}", get(jobs_routes::get_job).delete(jobs_routes::delete_job))
+        .route(
+            "/api/jobs",
+            get(jobs_routes::list).post(jobs_routes::create),
+        )
+        .route(
+            "/api/jobs/{id}",
+            get(jobs_routes::get_job).delete(jobs_routes::delete_job),
+        )
         .route("/api/jobs/{id}/start", post(jobs_routes::start_job))
         .route("/api/jobs/{id}/stop", post(jobs_routes::stop_job))
         .route("/api/jobs/{id}/logs", get(jobs_routes::get_logs))
@@ -145,7 +162,10 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/api/files/delete", delete(files_routes::delete))
         .route("/api/files/download", get(files_routes::download))
         .route("/api/files/upload", post(files_routes::upload))
-        .route("/api/settings", get(admin_routes::get_settings).put(admin_routes::put_settings))
+        .route(
+            "/api/settings",
+            get(admin_routes::get_settings).put(admin_routes::put_settings),
+        )
         .route("/api/audit", get(admin_routes::audit_list))
         .route("/api/update/status", get(update_routes::status))
         .route("/api/update/check", post(update_routes::check))
@@ -156,5 +176,26 @@ pub fn build_router(state: SharedState) -> Router {
     Router::new()
         .merge(api)
         .fallback(static_handler)
+        // ハンドラ内のパニックを握り潰さず 500 JSON に変換する（サーバー全体は継続稼働）
+        .layer(CatchPanicLayer::custom(|panic| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({
+                    "error": { "code": "internal", "message": format!("内部エラー: {}", panic_message(panic)) }
+                })),
+            )
+                .into_response()
+        }))
         .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024 * 1024))
+}
+
+/// `std::panic::panic_any` のペイロードは型不明なので、主要な2型からメッセージを取り出す
+fn panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = panic.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = panic.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "不明なパニック（型情報なし）".to_string()
+    }
 }

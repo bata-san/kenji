@@ -27,7 +27,10 @@ pub async fn overview(
             "jobs_summary".into(),
             serde_json::json!({"running": running, "total": total, "failed": failed}),
         );
-        obj.insert("tunnel".into(), serde_json::to_value(state.tunnel.info()).unwrap_or_default());
+        obj.insert(
+            "tunnel".into(),
+            serde_json::to_value(state.tunnel.info()).unwrap_or_default(),
+        );
     }
     Ok(Json(value))
 }

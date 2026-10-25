@@ -24,16 +24,32 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, code, message) = match &self {
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, "bad_request", m.clone()),
-            ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized", "invalid token".into()),
-            ApiError::Forbidden => (StatusCode::FORBIDDEN, "forbidden", "insufficient role".into()),
+            ApiError::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "invalid token".into(),
+            ),
+            ApiError::Forbidden => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "insufficient role".into(),
+            ),
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not_found", "not found".into()),
             ApiError::Conflict(m) => (StatusCode::CONFLICT, "conflict", m.clone()),
             ApiError::Internal(e) => {
                 tracing::error!("internal error: {e:#}");
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal server error".into())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    "internal server error".into(),
+                )
             }
         };
-        (status, Json(json!({"error": {"code": code, "message": message}}))).into_response()
+        (
+            status,
+            Json(json!({"error": {"code": code, "message": message}})),
+        )
+            .into_response()
     }
 }
 
