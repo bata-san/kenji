@@ -28,11 +28,11 @@ endpoints:
 From the repository root:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows-services.ps1 -NgrokConfig "C:\ProgramData\kenji\ngrok.yml" -KenjiExe ".\target\release\kenji.exe"
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows-services.ps1 -NgrokConfig "C:\ProgramData\kenji\ngrok.yml" -KenjiExe ".\target\release\kenji.exe" -AllowLocalSystem
 Get-Service kenji,ngrok
 ```
 
-Use `-NgrokExe "C:\path\to\ngrok.exe"` if the ngrok CLI is not on PATH, `-InstallDir` to override the Kenji installation directory, or `-NoStart` to register without starting.
+Use `-NgrokExe "C:\path\to\ngrok.exe"` if the ngrok CLI is not on PATH, `-InstallDir` to override the Kenji installation directory, or `-NoStart` to register without starting. `-AllowLocalSystem` explicitly opts in to creating a new SYSTEM-privileged Kenji service. For production, instead install the existing Kenji service with `kenji service install --account ...` under a dedicated low-privilege account first, then run this script without that switch.
 
 The script validates its inputs first and then:
 1. Copies Kenji to a stable executable path (`C:\Program Files\Kenji\kenji.exe` by default), runs interactive `kenji setup` if necessary, and calls `kenji service install`.
@@ -40,7 +40,7 @@ The script validates its inputs first and then:
 3. Configures both services for automatic start and three SCM recovery restarts at 60-second intervals.
 4. Starts Kenji before ngrok and verifies both services reach `Running`.
 
-You can rerun it after partial completion. Existing services are left intact: **the script does not replace a running Kenji executable or rewrite an already-registered ngrok service's configuration**. If ngrok was already installed as a service, the `-NgrokConfig` argument is verified but does **not** update that service's existing settings. To change them, follow ngrok's service management documentation.
+You can rerun it after partial completion. Existing services are left intact: **the script does not replace a running Kenji executable or rewrite an already-registered ngrok service's configuration**. If ngrok was already installed as a service, `-NgrokConfig` may be omitted. If supplied, it is verified but does **not** update that service's existing settings. To change them, follow ngrok's service management documentation.
 
 Stop any previous interactive `ngrok http` process using the same endpoint before enabling its service, otherwise duplicate endpoint sessions may conflict.
 
@@ -54,7 +54,7 @@ Stop any previous interactive `ngrok http` process using the same endpoint befor
 
 ## Security and scope
 
-The existing Kenji service installer defaults to **LocalSystem** when a service account is not supplied. This makes remote shell/agent operations extremely privileged. Use a dedicated least-privilege service account and ngrok-side access policy for real deployments. Never expose Kenji to an untrusted network without additional access protection. Only deploy on machines and networks where the administrator has authorized remote access.
+The existing Kenji service installer defaults to **LocalSystem** when a service account is not supplied. The bundle script refuses to create such a service unless `-AllowLocalSystem` is explicitly given. This makes remote shell/agent operations extremely privileged. Use a dedicated least-privilege service account and ngrok-side access policy for real deployments. Never expose Kenji to an untrusted network without additional access protection. Only deploy on machines and networks where the administrator has authorized remote access.
 
 The bundled PowerShell script is an installer, **not a graphical setup wizard**. It does not distribute ngrok, provision domains, generate access policies, migrate existing service accounts, or implement an ngrok process supervisor. ngrok itself manages its separate service lifecycle.
 
