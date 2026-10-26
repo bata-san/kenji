@@ -4,12 +4,12 @@
 # required; this script deliberately never accepts or stores an auth token.
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
     [string]$NgrokConfig,
     [string]$KenjiExe,
     [string]$NgrokExe,
     [string]$InstallDir = (Join-Path $env:ProgramFiles 'Kenji'),
-    [switch]$NoStart
+    [switch]$NoStart,
+    [switch]$AllowLocalSystem
 )
 
 Set-StrictMode -Version Latest
@@ -73,13 +73,20 @@ function Start-IfStopped([string]$Name) {
 }
 
 Assert-Administrator
-$config = Resolve-ExistingFile $NgrokConfig 'ngrok 設定ファイル'
-if ([IO.Path]::GetExtension($config) -notin @('.yml', '.yaml')) {
-    throw 'ngrok 設定ファイルには .yml または .yaml を指定してください。'
-}
-
 $kenjiService = Get-Service -Name 'kenji' -ErrorAction SilentlyContinue
 $ngrokService = Get-Service -Name 'ngrok' -ErrorAction SilentlyContinue
+$config = $null
+if (-not [string]::IsNullOrWhiteSpace($NgrokConfig)) {
+    $config = Resolve-ExistingFile $NgrokConfig 'ngrok 設定ファイル'
+    if ([IO.Path]::GetExtension($config) -notin @('.yml', '.yaml')) {
+        throw 'ngrok 設定ファイルには .yml または .yaml を指定してください。'
+    }
+} elseif ($null -eq $ngrokService) {
+    throw 'ngrok サービスを初回登録するには -NgrokConfig が必要です。'
+}
+if ($null -eq $kenjiService -and -not $AllowLocalSystem) {
+    throw 'Kenji の新規サービス登録は既定でLocalSystemになります。専用アカウントで先にサービスを登録するか、権限リスクを理解したうえで -AllowLocalSystem を付けてください。'
+}
 
 # Verify all external inputs before creating either service.
 if ($null -eq $kenjiService) {
@@ -124,7 +131,7 @@ if ($null -eq $ngrokService) {
     & $ngrokBinary service install --config $config
     Assert-ExitCode 'ngrok のサービス登録'
 } else {
-    Write-Warning 'ngrok サービスは登録済みです。既存設定を変更しません。指定した -NgrokConfig と一致するか確認してください。'
+    Write-Warning 'ngrok サービスは登録済みです。既存のサービス設定を変更しません。'
 }
 
 foreach ($name in @('kenji', 'ngrok')) {
