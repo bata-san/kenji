@@ -501,7 +501,7 @@ function CreateJobDialog({
               <Input
                 value={cwd}
                 onChange={(e) => setCwd(e.target.value)}
-                placeholder="例: proj（省略時はワークスペースルート）"
+                placeholder="例: proj（省略時は自分の作業フォルダ）"
               />
             </Field>
             <Field label="環境変数（JSON、任意）" error={errors.env} className="col-span-2">

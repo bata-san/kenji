@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const MAX_UPLOAD_FILE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_UPLOAD_REQUEST_BYTES: u64 = 512 * 1024 * 1024;
@@ -26,13 +26,21 @@ use crate::files;
 use crate::routes::{bearer_auth, AuthCtx};
 use crate::state::{role_str, SharedState};
 
-fn workspace_root(state: &SharedState) -> PathBuf {
-    state
+/// Each authenticated principal gets its own folder under the workspace root.
+/// API keys share `_shared`; the folder is created lazily if it is missing.
+fn user_workspace_root(state: &SharedState, ctx: &AuthCtx) -> ApiResult<PathBuf> {
+    let workspace = state
         .config
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .workspace_root
-        .clone()
+        .clone();
+    files::ensure_user_root(&workspace, &ctx.username).map_err(|e| {
+        ApiError::Internal(anyhow::anyhow!(
+            "ユーザー `{}` の作業フォルダを準備できません: {e:#}",
+            ctx.username
+        ))
+    })
 }
 
 fn normalize(rel: &str) -> String {
@@ -50,11 +58,20 @@ pub struct PathQuery {
     pub path: Option<String>,
 }
 
-fn resolve_checked(state: &SharedState, rel: &str) -> ApiResult<(PathBuf, String)> {
-    let root = workspace_root(state);
+fn resolve_in_root(root: &Path, rel: &str) -> ApiResult<(PathBuf, String)> {
     let p =
-        files::resolve_under_root(&root, rel).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        files::resolve_under_root(root, rel).map_err(|e| ApiError::BadRequest(e.to_string()))?;
     Ok((p, normalize(rel)))
+}
+
+fn resolve_checked(
+    state: &SharedState,
+    ctx: &AuthCtx,
+    rel: &str,
+) -> ApiResult<(PathBuf, PathBuf, String)> {
+    let root = user_workspace_root(state, ctx)?;
+    let (p, norm) = resolve_in_root(&root, rel)?;
+    Ok((root, p, norm))
 }
 
 // ---- list ----
@@ -67,9 +84,8 @@ pub async fn list(
     Query(q): Query<PathQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     ctx.require(Role::Viewer)?;
-    let (dir, norm) = resolve_checked(&state, q.path.as_deref().unwrap_or("/"))?;
-    let dir =
-        files::ensure_within(&workspace_root(&state), &dir).map_err(|_| ApiError::NotFound)?;
+    let (root, dir, norm) = resolve_checked(&state, &ctx, q.path.as_deref().unwrap_or("/"))?;
+    let dir = files::ensure_within(&root, &dir).map_err(|_| ApiError::NotFound)?;
 
     let mut entries: Vec<FsEntry> = Vec::new();
     let mut rd = tokio::fs::read_dir(&dir)
@@ -117,9 +133,8 @@ pub async fn mkdir(
     Json(body): Json<PathBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     ctx.require(Role::Operator)?;
-    let (dir, norm) = resolve_checked(&state, &body.path)?;
-    files::ensure_within(&workspace_root(&state), &dir)
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let (root, dir, norm) = resolve_checked(&state, &ctx, &body.path)?;
+    files::ensure_within(&root, &dir).map_err(|e| ApiError::BadRequest(e.to_string()))?;
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(ApiError::from)?;
@@ -143,9 +158,8 @@ pub async fn r#move(
     Json(body): Json<MoveBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     ctx.require(Role::Operator)?;
-    let (from, from_norm) = resolve_checked(&state, &body.from)?;
-    let (to, to_norm) = resolve_checked(&state, &body.to)?;
-    let root = workspace_root(&state);
+    let (root, from, from_norm) = resolve_checked(&state, &ctx, &body.from)?;
+    let (to, to_norm) = resolve_in_root(&root, &body.to)?;
     let from = files::ensure_within(&root, &from).map_err(|_| ApiError::NotFound)?;
     let to = files::ensure_within(&root, &to).map_err(|e| ApiError::BadRequest(e.to_string()))?;
     files::ensure_not_root(&root, &from).map_err(|e| ApiError::BadRequest(e.to_string()))?;
@@ -170,8 +184,7 @@ pub async fn delete(
     Query(q): Query<PathQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     ctx.require(Role::Operator)?;
-    let (p, norm) = resolve_checked(&state, q.path.as_deref().unwrap_or("/"))?;
-    let root = workspace_root(&state);
+    let (root, p, norm) = resolve_checked(&state, &ctx, q.path.as_deref().unwrap_or("/"))?;
     let p = files::ensure_within(&root, &p).map_err(|_| ApiError::NotFound)?;
     files::ensure_not_root(&root, &p).map_err(|e| ApiError::BadRequest(e.to_string()))?;
     let meta = tokio::fs::metadata(&p)
@@ -234,8 +247,8 @@ pub async fn download(
     let ctx = ctx.ok_or(ApiError::Unauthorized)?;
     ctx.require(Role::Viewer)?;
 
-    let (p, norm) = resolve_checked(&state, &q.path)?;
-    let root = workspace_root(&state);
+    let root = user_workspace_root(&state, &ctx)?;
+    let (p, norm) = resolve_in_root(&root, &q.path)?;
     let p = files::ensure_within(&root, &p).map_err(|e| ApiError::BadRequest(e.to_string()))?;
     let meta = tokio::fs::metadata(&p)
         .await
@@ -271,8 +284,7 @@ pub async fn upload(
     mut multipart: Multipart,
 ) -> ApiResult<Json<serde_json::Value>> {
     ctx.require(Role::Operator)?;
-    let (dir, norm) = resolve_checked(&state, q.path.as_deref().unwrap_or("/"))?;
-    let root = workspace_root(&state);
+    let (root, dir, norm) = resolve_checked(&state, &ctx, q.path.as_deref().unwrap_or("/"))?;
     let dir = files::ensure_within(&root, &dir).map_err(|e| ApiError::BadRequest(e.to_string()))?;
     let _ = norm;
 

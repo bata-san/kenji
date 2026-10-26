@@ -82,7 +82,7 @@ Windows PC を、インターネット経由で自由に使える小規模プラ
 - kenji はリモートからのコマンドを**サービスアカウント権限でのみ**実行する（昇格・`runas`・UAC昇格APIは提供しない）。
 - サービスアカウントは `kenji service install --account` で指定可能。**標準ユーザーアカウントを推奨**（LocalSystem 指定時は明示警告）。
 - 全ての操作は監査ログ（誰が・いつ・何を）に記録され、adminが参照可能。
-- ファイル操作はワークスペースルート配下に**サンドボックス化**（パストラバーサル拒否・正規化検証）。
+- ファイル操作は各ユーザーの専用フォルダ（`workspace/<ユーザー名>`）配下に**サンドボックス化**（パストラバーサル拒否・正規化検証）。APIキーは `workspace/_shared` を共有。
 
 ### ネットワーク
 - デフォルト `127.0.0.1` のみバインド。外部アクセスは Cloudflare Tunnel（TLS）経由のみ。
@@ -97,7 +97,7 @@ C:\ProgramData\kenji\
 ├── config.json      # ポート・ワークスペース・JWTシークレット・トンネル設定
 ├── auth.json        # 管理者(ハッシュ)・APIキー(ハッシュ) ※厳格ACL
 ├── jobs.json        # ジョブ定義（停止状態でも永続）
-├── workspace\       # ファイルAPI・ジョブcwd のサンドボックスルート
+├── workspace\       # ユーザー専用フォルダ（workspace/<ユーザー名>）の親
 ├── logs\<jobid>.log # ジョブログ（5MBローテーション、.1を1世代保持）
 ├── audit\audit.jsonl # 監査ログ（10MBローテーション）
 └── updates\          # アップデートステージング（kenji.exe.new・finalize.log）

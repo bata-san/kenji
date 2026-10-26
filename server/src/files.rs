@@ -2,6 +2,89 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 
+/// Workspace folder shared by API-key principals (`key:<name>`), whose
+/// synthetic names are not valid Windows folder names.
+pub const SHARED_USER_FOLDER: &str = "_shared";
+
+/// True when the principal is an API key rather than a user database account.
+pub fn is_api_key_principal(username: &str) -> bool {
+    username.starts_with("key:")
+}
+
+/// Validate a username that will also become a folder name under the workspace.
+pub fn validate_user_folder_name(username: &str) -> Result<()> {
+    if is_api_key_principal(username) || username.trim() != username {
+        return Err(anyhow!("invalid user folder name"));
+    }
+    let name = safe_file_name(username)?;
+    if name.eq_ignore_ascii_case(SHARED_USER_FOLDER) {
+        return Err(anyhow!("reserved user folder name"));
+    }
+    Ok(())
+}
+
+/// Folder name used for a principal. API keys share `_shared`; every database
+/// user gets a folder named after the username.
+pub fn user_folder_name(username: &str) -> Result<String> {
+    if is_api_key_principal(username) {
+        return Ok(SHARED_USER_FOLDER.to_string());
+    }
+    validate_user_folder_name(username)?;
+    Ok(username.to_string())
+}
+
+/// Absolute (not yet guaranteed to exist) root folder for a principal.
+pub fn user_root(workspace_root: &Path, username: &str) -> Result<PathBuf> {
+    Ok(workspace_root.join(user_folder_name(username)?))
+}
+
+/// Create and return a principal's dedicated root. Fails closed when the path
+/// is a reparse point or resolves somewhere other than the expected folder, so
+/// one user cannot alias another user's root with a junction/symlink.
+pub fn ensure_user_root(workspace_root: &Path, username: &str) -> Result<PathBuf> {
+    std::fs::create_dir_all(workspace_root)?;
+    let root = user_root(workspace_root, username)?;
+    std::fs::create_dir_all(&root)?;
+
+    let canon_workspace = std::fs::canonicalize(workspace_root)?;
+    let canon_root = std::fs::canonicalize(&root)?;
+    let expected = canon_workspace.join(user_folder_name(username)?);
+    if !same_path(&canon_root, &expected) {
+        return Err(anyhow!("user workspace folder resolves outside its root"));
+    }
+    let meta = std::fs::symlink_metadata(&root)?;
+    if !meta.is_dir() || is_reparse_point(&meta) {
+        return Err(anyhow!("user workspace folder is not a real directory"));
+    }
+    // Return the caller-facing path (not the canonical `\\?\...` form) after
+    // validating that it really resolves to the expected folder.
+    Ok(root)
+}
+
+#[cfg(windows)]
+fn same_path(a: &Path, b: &Path) -> bool {
+    a.as_os_str()
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&b.as_os_str().to_string_lossy())
+}
+
+#[cfg(not(windows))]
+fn same_path(a: &Path, b: &Path) -> bool {
+    a == b
+}
+
+#[cfg(windows)]
+fn is_reparse_point(meta: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_reparse_point(meta: &std::fs::Metadata) -> bool {
+    meta.file_type().is_symlink()
+}
+
 /// Resolve a user-supplied workspace-relative path (e.g. "src", "/src/main.rs")
 /// to an absolute path, rejecting traversal and absolute/prefixed paths.
 pub fn resolve_under_root(root: &Path, user_path: &str) -> Result<PathBuf> {
@@ -167,6 +250,46 @@ mod tests {
         assert!(safe_file_name("COM1.log").is_err());
         assert!(safe_file_name("LPT9").is_err());
         assert!(safe_file_name("normal.txt").is_ok());
+    }
+
+    #[test]
+    fn user_roots_are_created_from_usernames() {
+        let temp = tempfile::tempdir().unwrap();
+        let ws = temp.path().join("workspace");
+
+        let alice = ensure_user_root(&ws, "alice").unwrap();
+        assert_eq!(alice, ws.join("alice"));
+        assert!(alice.is_dir());
+
+        let shared = ensure_user_root(&ws, "key:deploy").unwrap();
+        assert_eq!(shared, ws.join(SHARED_USER_FOLDER));
+        assert!(shared.is_dir());
+
+        // A real user must not be able to claim the API-key shared folder.
+        assert!(ensure_user_root(&ws, "_shared").is_err());
+        assert!(ensure_user_root(&ws, "_SHARED").is_err());
+        // Windows reserved names and unsafe folder names are rejected.
+        assert!(ensure_user_root(&ws, "CON").is_err());
+        assert!(ensure_user_root(&ws, "report.").is_err());
+        assert!(ensure_user_root(&ws, "../escape").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn user_root_junction_to_another_user_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let ws = temp.path().join("workspace");
+        let bob = ensure_user_root(&ws, "bob").unwrap();
+        let alice = ws.join("alice");
+        let output = std::process::Command::new("cmd")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&alice)
+            .arg(&bob)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "mklink /J failed: {:?}", output);
+        assert!(ensure_user_root(&ws, "alice").is_err());
+        std::fs::remove_dir(&alice).unwrap();
     }
 
     #[test]

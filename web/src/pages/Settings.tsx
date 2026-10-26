@@ -891,7 +891,7 @@ function UserDialog({
           <DialogTitle>新規ユーザー</DialogTitle>
         </DialogHeader>
         <form className="space-y-3" onSubmit={(e) => void submit(e)}>
-          <Field label="ユーザー名" hint="英数字と . _ - @（1〜64文字）">
+          <Field label="ユーザー名" hint="英数字と . _ - @（1〜64文字）。専用の作業フォルダも作成されます">
             <Input
               value={username}
               onChange={(e) => setUsername(e.target.value)}

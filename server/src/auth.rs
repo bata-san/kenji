@@ -663,6 +663,10 @@ fn validate_username(username: &str) -> Result<(), String> {
     {
         return Err("ユーザー名は英数字と . _ - @ のみ使用できます".into());
     }
+    crate::files::validate_user_folder_name(username).map_err(|_| {
+        "ユーザー名はフォルダ名として使用できません（Windows予約名・末尾のドット/空白・_sharedは不可）"
+            .to_string()
+    })?;
     Ok(())
 }
 
@@ -863,6 +867,28 @@ mod tests {
 
         assert!(store.delete_user("42101").unwrap());
         assert!(store.login("42101", "hattori", "ip4").unwrap().is_none());
+    }
+
+    #[test]
+    fn usernames_must_be_valid_folder_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let store = AuthStore::create(&path, "admin", "admin-pass", "test-secret").unwrap();
+        for name in [
+            "CON", "nul", "COM1", "LPT9.txt", "report.", "report ", "_shared", "_SHARED", "a/b",
+            "key:foo", "..", ".",
+        ] {
+            assert!(
+                matches!(
+                    store.create_user(name, "password", Role::Viewer),
+                    Err(UserError::Invalid(_))
+                ),
+                "{name:?} should be rejected"
+            );
+        }
+        assert!(store
+            .create_user("user.name-1@example", "password", Role::Viewer)
+            .is_ok());
     }
 
     #[test]

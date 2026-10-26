@@ -116,9 +116,9 @@ Job オブジェクト:
 
 ---
 
-## Files（ワークスペースルート配下のみ。`..` は拒否）
+## Files（各ユーザーの専用フォルダ配下のみ。`..` は拒否）
 
-パス表現: ルートが `/`。例 `/src/main.rs`、`/docs`。クエリ/JSONとも文字列。
+パス表現: 自分の専用フォルダ（`workspace/<ユーザー名>`）のルートが `/`。APIキーは `workspace/_shared` を共有。例 `/src/main.rs`、`/docs`。クエリ/JSONとも文字列。
 
 ### GET /api/files/list?path=/  (viewer+)
 → `{"path":"/","entries":[{"name":"main.rs","kind":"file","size":123,"modified":"2026-10-25T09:00:00Z"},{"name":"docs","kind":"dir","size":null,"modified":"..."}]}`

@@ -54,7 +54,7 @@ function joinPath(dir: string, name: string): string {
 }
 
 function crumbs(path: string): Array<{ label: string; path: string }> {
-  const items: Array<{ label: string; path: string }> = [{ label: 'ワークスペース', path: '/' }];
+  const items: Array<{ label: string; path: string }> = [{ label: 'マイワークスペース', path: '/' }];
   let cur = '';
   for (const part of path.split('/').filter(Boolean)) {
     cur += `/${part}`;

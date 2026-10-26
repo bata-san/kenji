@@ -50,6 +50,21 @@ pub async fn create(
     let user = state
         .auth
         .create_user(&body.username, &body.password, role)?;
+    let workspace = state
+        .config
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .workspace_root
+        .clone();
+    if let Err(e) = crate::files::ensure_user_root(&workspace, &user.username) {
+        // Keep the database and filesystem consistent: if the dedicated folder
+        // cannot be created, do not leave a half-provisioned account behind.
+        let _ = state.auth.delete_user(&user.username);
+        return Err(ApiError::Internal(anyhow::anyhow!(
+            "ユーザー `{}` の作業フォルダを作成できません: {e:#}",
+            user.username
+        )));
+    }
     state.audit.log(
         &ctx.username,
         role_str(&ctx.role),

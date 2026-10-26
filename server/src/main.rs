@@ -396,6 +396,29 @@ pub async fn run_server(
     };
     // 旧バージョンからの移行で users.db が作られた場合も含めて ACL を厳格化する。
     harden_acl(&data_dir);
+    // Every existing account owns a folder named after its username. Missing
+    // folders are recreated on startup so a manual cleanup cannot break logins.
+    match auth.list_users() {
+        Ok(users) => {
+            for user in users {
+                if let Err(e) = files::ensure_user_root(&cfg.workspace_root, &user.username) {
+                    tracing::error!(
+                        "ユーザー `{}` の作業フォルダを準備できません: {e:#}",
+                        user.username
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("ユーザー一覧の読み込みに失敗しました: {e:#}");
+            return 1;
+        }
+    }
+    if !auth.list_keys().is_empty() {
+        if let Err(e) = files::ensure_user_root(&cfg.workspace_root, "key:shared") {
+            tracing::error!("APIキー共有作業フォルダを準備できません: {e:#}");
+        }
+    }
     let resources = match resources::ResourceGuard::new() {
         Ok(guard) => Arc::new(guard),
         Err(e) => {
@@ -658,6 +681,10 @@ fn do_setup(
         eprintln!("認証情報の作成に失敗: {e:#}");
         return 1;
     }
+    if let Err(e) = files::ensure_user_root(&cfg.workspace_root, &username) {
+        eprintln!("管理者の作業フォルダ作成に失敗: {e:#}");
+        return 1;
+    }
     harden_acl(&data_dir);
 
     println!("セットアップ完了。");
@@ -707,13 +734,32 @@ fn do_user(data_dir: Option<PathBuf>, sub: UserSub) -> i32 {
                 eprintln!("ロールは viewer / operator / admin のいずれかで指定してください。");
                 return 1;
             };
-            store.create_user(&username, &password, role).map(|u| {
-                println!(
-                    "ユーザー `{}` を追加しました（ロール: {}）。",
-                    u.username,
-                    u.role.as_str()
-                );
-            })
+            let cfg = match Config::load(&data_dir) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("設定の読み込みに失敗しました: {e:#}");
+                    return 1;
+                }
+            };
+            match store.create_user(&username, &password, role) {
+                Ok(u) => {
+                    if let Err(e) = files::ensure_user_root(&cfg.workspace_root, &u.username) {
+                        let _ = store.delete_user(&u.username);
+                        eprintln!(
+                            "ユーザー `{}` の作業フォルダ作成に失敗しました: {e:#}",
+                            u.username
+                        );
+                        return 1;
+                    }
+                    println!(
+                        "ユーザー `{}` を追加しました（ロール: {}）。",
+                        u.username,
+                        u.role.as_str()
+                    );
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
         }
         UserSub::List => store
             .list_users()

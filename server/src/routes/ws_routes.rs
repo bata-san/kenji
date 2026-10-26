@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 
+use anyhow::Context as _;
 use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
@@ -9,6 +10,7 @@ use tokio::sync::mpsc;
 
 use crate::auth::Role;
 use crate::error::{ApiError, ApiResult};
+use crate::files;
 use crate::pty::PtySession;
 use crate::routes::ws_auth;
 use crate::state::{role_str, SharedState};
@@ -27,7 +29,7 @@ pub async fn terminal_ws(
         .try_acquire(&ctx.username)
         .map_err(|e| ApiError::Conflict(e.to_string()))?;
 
-    let (shell, args, workspace) = {
+    let (shell, args, workspace_root) = {
         let cfg = state.config.read().unwrap_or_else(|e| e.into_inner());
         (
             cfg.terminal.shell.clone(),
@@ -35,6 +37,9 @@ pub async fn terminal_ws(
             cfg.workspace_root.clone(),
         )
     };
+    let workspace = files::ensure_user_root(&workspace_root, &ctx.username)
+        .context("ユーザー作業フォルダを準備できません")
+        .map_err(ApiError::from)?;
     let session = PtySession::open(&shell, &args, &workspace, 80, 24).map_err(ApiError::from)?;
     state
         .audit

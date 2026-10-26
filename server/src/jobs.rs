@@ -352,6 +352,17 @@ impl JobManager {
         if let Some(schedule) = &req.schedule {
             parse_cron(schedule).map_err(|e| anyhow!("スケジュール形式が不正です: {e}"))?;
         }
+        // Reject a relative cwd that escapes the owner's folder at creation
+        // time. Absolute paths keep their existing semantics.
+        if let Some(cwd) = &req.cwd {
+            if !std::path::Path::new(cwd).is_absolute() {
+                let base = crate::files::ensure_user_root(&self.workspace_root, user)?;
+                let p = crate::files::resolve_under_root(&base, cwd)
+                    .map_err(|e| anyhow!("作業ディレクトリが不正です: {e}"))?;
+                crate::files::ensure_within(&base, &p)
+                    .map_err(|e| anyhow!("作業ディレクトリが作業フォルダ外です: {e}"))?;
+            }
+        }
         let def = JobDef {
             id: Uuid::new_v4(),
             name: name.to_string(),
@@ -747,10 +758,27 @@ impl JobManager {
     async fn launch(&self, def: &JobDef, rt: &Arc<JobRuntime>) -> Result<tokio::process::Child> {
         let mut cmd = tokio::process::Command::new(&def.command);
         cmd.args(&def.args);
+        // New jobs run inside their owner's dedicated folder. Legacy jobs
+        // (owner empty) keep the old shared workspace as their base.
+        let base = if def.owner.is_empty() {
+            self.workspace_root.clone()
+        } else {
+            crate::files::ensure_user_root(&self.workspace_root, &def.owner).with_context(|| {
+                format!(
+                    "ジョブ所有者 `{}` の作業フォルダを準備できません",
+                    def.owner
+                )
+            })?
+        };
         let cwd = match &def.cwd {
             Some(c) if std::path::Path::new(c).is_absolute() => PathBuf::from(c),
-            Some(c) => self.workspace_root.join(c),
-            None => self.workspace_root.clone(),
+            Some(c) => {
+                let p = crate::files::resolve_under_root(&base, c)
+                    .with_context(|| format!("ジョブの作業ディレクトリが不正です: {c}"))?;
+                crate::files::ensure_within(&base, &p)
+                    .with_context(|| format!("ジョブの作業ディレクトリが作業フォルダ外です: {c}"))?
+            }
+            None => base,
         };
         cmd.current_dir(&cwd);
         cmd.envs(&def.env);

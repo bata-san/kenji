@@ -4,11 +4,11 @@
 
 - **汎用実行**: 任意のコマンド・スクリプト・常駐サービスを「ジョブ」として統一管理（開始/停止/再実行/再起動ポリシー/cronスケジュール/ログ収集）
 - **リモートターミナル**: PowerShell（ConPTY）をブラウザから操作
-- **ファイル管理**: ワークスペース内のアップロード/ダウンロード/リネーム/削除
+- **ファイル管理**: ユーザーごとの専用フォルダ内でアップロード/ダウンロード/リネーム/削除
 - **リソース監視**: CPU / メモリ / ディスク / GPU（NVIDIA）
 - **遠隔アクセス**: Cloudflare Tunnel でポート開放・固定IP不要
 - **常駐動作**: Windows Service として自動起動
-- **セキュリティ**: JWTログイン + APIキー + 3段階ロール（viewer / operator / admin）+ 監査ログ + ログインロックアウト
+- **セキュリティ**: SQLiteユーザー管理 + JWTログイン + APIキー + 3段階ロール（viewer / operator / admin）+ 監査ログ + ログインロックアウト
 
 設計の詳細は [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)、API仕様は [docs/api.md](docs/api.md) を参照してください。
 
@@ -69,6 +69,7 @@ Quick Tunnel はアカウント不要ですが、恒常利用には Named Tunnel
 ```
 kenji serve          # フォアグラウンド実行（--bind --port --data-dir）
 kenji setup          # 初回セットアップ（--username --password --data-dir --force）
+kenji user add|list|passwd|delete   # ユーザー管理（--data-dir）
 kenji service install|uninstall   # Windowsサービス管理（要管理者権限）
 kenji service run    # SCMから呼ばれる本体
 kenji mcp            # MCPサーバー（stdio）— AIエージェント接続用（--url --token）
@@ -88,7 +89,8 @@ Invoke-RestMethod http://127.0.0.1:8787/api/system/overview -Headers $H
 - kenji はリモートからのコマンドを**サービスアカウントの権限で**実行します。昇格API（runas / UAC）は提供しません
 - サービスアカウントには**標準ユーザーを推奨**します（LocalSystem は遠隔操作に強すぎます）
 - すべての操作は監査ログに記録されます（設定画面から参照可）
-- ファイル操作はワークスペースルート配下に限定されます
+- ファイル操作は各ユーザーの専用フォルダ（`workspace/<ユーザー名>`）配下に限定されます。APIキーは `workspace/_shared` を共有します
+- ターミナルとジョブの既定ディレクトリもユーザー専用フォルダです（ターミナル/ジョブ自体はサービスアカウント権限で動作するため、OSレベルのサンドボックスではありません）
 - 外部公開は Cloudflare Tunnel 経由のみ（localhost バインド + エッジTLS）。Cloudflare Access 併用を推奨
 
 ## スモークテスト
