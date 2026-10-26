@@ -11,8 +11,19 @@ use uuid::Uuid;
 use crate::auth::Role;
 use crate::error::{ApiError, ApiResult};
 use crate::jobs::{CreateJobRequest, JobStatus};
-use crate::routes::ws_auth;
+use crate::routes::{ws_auth, AuthCtx};
 use crate::state::{role_str, SharedState};
+
+/// Reject operations on jobs owned by another user before touching runtime
+/// state, so the API returns 403 (not a generic conflict).
+fn ensure_job_access(state: &SharedState, ctx: &AuthCtx, id: &Uuid) -> ApiResult<()> {
+    let view = state.jobs.get(id).ok_or(ApiError::NotFound)?;
+    if ctx.role == Role::Admin || view.owner.is_empty() || view.owner == ctx.username {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden)
+    }
+}
 
 pub async fn list(
     State(state): State<SharedState>,
@@ -52,9 +63,11 @@ pub async fn start_job(
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<serde_json::Value>> {
     ctx.require(Role::Operator)?;
+    ensure_job_access(&state, &ctx, &id)?;
     let view = state
         .jobs
         .start(&ctx.username, role_str(&ctx.role), &id)
+        .await
         .map_err(ApiError::Conflict)?;
     Ok(Json(json!({ "job": view })))
 }
@@ -65,6 +78,7 @@ pub async fn stop_job(
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<serde_json::Value>> {
     ctx.require(Role::Operator)?;
+    ensure_job_access(&state, &ctx, &id)?;
     let view = state
         .jobs
         .stop(&ctx.username, role_str(&ctx.role), &id)
@@ -78,6 +92,7 @@ pub async fn delete_job(
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<serde_json::Value>> {
     ctx.require(Role::Operator)?;
+    ensure_job_access(&state, &ctx, &id)?;
     state
         .jobs
         .delete(&ctx.username, role_str(&ctx.role), &id)

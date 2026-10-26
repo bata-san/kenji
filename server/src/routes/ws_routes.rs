@@ -24,7 +24,7 @@ pub async fn terminal_ws(
 
     let guard = state
         .terminals
-        .try_acquire()
+        .try_acquire(&ctx.username)
         .map_err(|e| ApiError::Conflict(e.to_string()))?;
 
     let (shell, args, workspace) = {

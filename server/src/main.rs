@@ -25,7 +25,7 @@ use futures_util::FutureExt as _;
 use tokio::sync::watch;
 
 use crate::audit::Audit;
-use crate::auth::AuthStore;
+use crate::auth::{AuthStore, Role, UserError};
 use crate::config::Config;
 use crate::jobs::JobManager;
 use crate::metrics::MetricsCache;
@@ -70,9 +70,16 @@ enum Cmd {
         username: Option<String>,
         #[arg(long)]
         password: Option<String>,
-        /// 既存の auth.json を管理者パスワードごと再作成する
+        /// 既存の管理者パスワードを再設定する（他のユーザーとAPIキーは保持）
         #[arg(long)]
         force: bool,
+    },
+    /// ユーザー管理（SQLite: users.db）
+    User {
+        #[arg(long, global = true)]
+        data_dir: Option<PathBuf>,
+        #[command(subcommand)]
+        sub: UserSub,
     },
     /// Windowsサービスの管理（要管理者権限）
     Service {
@@ -117,6 +124,33 @@ enum Cmd {
 }
 
 #[derive(Subcommand)]
+enum UserSub {
+    /// ユーザーを追加
+    Add {
+        #[arg(long)]
+        username: String,
+        #[arg(long)]
+        password: String,
+        #[arg(long, default_value = "viewer")]
+        role: String,
+    },
+    /// ユーザー一覧
+    List,
+    /// パスワードを変更
+    Passwd {
+        #[arg(long)]
+        username: String,
+        #[arg(long)]
+        password: String,
+    },
+    /// ユーザーを削除
+    Delete {
+        #[arg(long)]
+        username: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum ServiceSub {
     /// サービスとして登録（自動開始）
     Install {
@@ -148,6 +182,7 @@ fn main() {
             password,
             force,
         } => do_setup(data_dir, username, password, force),
+        Cmd::User { data_dir, sub } => do_user(data_dir, sub),
         #[cfg(windows)]
         Cmd::Service { sub } => match sub {
             ServiceSub::Install { account, password } => {
@@ -359,6 +394,8 @@ pub async fn run_server(
             return 1;
         }
     };
+    // 旧バージョンからの移行で users.db が作られた場合も含めて ACL を厳格化する。
+    harden_acl(&data_dir);
     let resources = match resources::ResourceGuard::new() {
         Ok(guard) => Arc::new(guard),
         Err(e) => {
@@ -642,6 +679,99 @@ fn do_setup(
     0
 }
 
+fn do_user(data_dir: Option<PathBuf>, sub: UserSub) -> i32 {
+    let data_dir = data_dir.unwrap_or_else(default_data_dir);
+    let auth_path = data_dir.join("auth.json");
+    if !auth_path.exists() {
+        eprintln!(
+            "認証情報がありません（{}）。先に `kenji setup` を実行してください。",
+            auth_path.display()
+        );
+        return 1;
+    }
+    let store = match AuthStore::load(&auth_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("認証情報の読み込みに失敗しました: {e:#}");
+            return 1;
+        }
+    };
+
+    let result: Result<(), UserError> = match sub {
+        UserSub::Add {
+            username,
+            password,
+            role,
+        } => {
+            let Some(role) = Role::parse(&role) else {
+                eprintln!("ロールは viewer / operator / admin のいずれかで指定してください。");
+                return 1;
+            };
+            store.create_user(&username, &password, role).map(|u| {
+                println!(
+                    "ユーザー `{}` を追加しました（ロール: {}）。",
+                    u.username,
+                    u.role.as_str()
+                );
+            })
+        }
+        UserSub::List => store
+            .list_users()
+            .map(|users| {
+                if users.is_empty() {
+                    println!("ユーザーがいません。");
+                    return;
+                }
+                println!(
+                    "{:<24} {:<10} {:<20} {}",
+                    "USERNAME", "ROLE", "CREATED", "STATUS"
+                );
+                for u in users {
+                    let created = chrono::DateTime::parse_from_rfc3339(&u.created_at)
+                        .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                        .unwrap_or_else(|_| u.created_at.clone());
+                    println!(
+                        "{:<24} {:<10} {:<20} {}",
+                        u.username,
+                        u.role.as_str(),
+                        created,
+                        if u.disabled { "disabled" } else { "active" }
+                    );
+                }
+            })
+            .map_err(UserError::Other),
+        UserSub::Passwd { username, password } => store
+            .set_password(&username, &password)
+            .and_then(|changed| {
+                if changed {
+                    println!("ユーザー `{username}` のパスワードを変更しました。");
+                    Ok(())
+                } else {
+                    Err(UserError::NotFound)
+                }
+            }),
+        UserSub::Delete { username } => store.delete_user(&username).and_then(|deleted| {
+            if deleted {
+                println!("ユーザー `{username}` を削除しました。");
+                Ok(())
+            } else {
+                Err(UserError::NotFound)
+            }
+        }),
+    };
+
+    // users.db はここで新規作成される場合があるため、秘密情報の ACL を厳格化する。
+    harden_acl(&data_dir);
+
+    match result {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("エラー: {e}");
+            1
+        }
+    }
+}
+
 fn prompt_line(msg: &str) -> String {
     print!("{msg}");
     let _ = std::io::stdout().flush();
@@ -650,20 +780,31 @@ fn prompt_line(msg: &str) -> String {
     s
 }
 
-/// Restrict secrets (auth.json) to SYSTEM / Administrators / the installing user.
+/// Restrict secrets (auth.json, users.db) to SYSTEM / Administrators / the installing user.
 fn harden_acl(data_dir: &std::path::Path) {
     #[cfg(windows)]
     {
-        let user = std::process::Command::new("whoami")
-            .output()
+        // `whoami` はコンソールのコードページによって文字化けするため、
+        // プロセスの環境変数からアカウント名を組み立てる。
+        let user = std::env::var("USERNAME")
             .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+            .filter(|u| !u.trim().is_empty());
         let Some(user) = user else {
             eprintln!("警告: ユーザー名を取得できず、ACLの厳格化をスキップしました。");
             return;
         };
-        for name in ["auth.json", "config.json"] {
+        let account = match std::env::var("USERDOMAIN") {
+            Ok(domain) if !domain.trim().is_empty() => format!("{domain}\\{user}"),
+            _ => user,
+        };
+        for name in [
+            "auth.json",
+            "config.json",
+            "users.db",
+            "users.db-journal",
+            "users.db-wal",
+            "users.db-shm",
+        ] {
             let p = data_dir.join(name);
             if !p.exists() {
                 continue;
@@ -672,10 +813,8 @@ fn harden_acl(data_dir: &std::path::Path) {
                 .arg(&p)
                 .arg("/inheritance:r")
                 .arg("/grant:r")
-                .arg(format!("{user}:(F)"))
-                .arg("/grant:r")
+                .arg(format!("{account}:(F)"))
                 .arg("SYSTEM:(F)")
-                .arg("/grant:r")
                 .arg("Administrators:(F)")
                 .output();
             match res {

@@ -150,6 +150,7 @@ export default function Jobs() {
             <TableHeader>
               <TableRow>
                 <TableHead>名前</TableHead>
+                <TableHead>所有者</TableHead>
                 <TableHead>コマンド</TableHead>
                 <TableHead>ステータス</TableHead>
                 <TableHead>PID</TableHead>
@@ -168,6 +169,7 @@ export default function Jobs() {
                   onClick={() => setSelectedId(job.id)}
                 >
                   <TableCell className="font-medium text-zinc-900">{job.name}</TableCell>
+                  <TableCell className="text-muted-foreground">{job.owner || '共通'}</TableCell>
                   <TableCell>
                     <code
                       className="block max-w-[220px] truncate font-mono text-muted-foreground"
@@ -362,6 +364,7 @@ function JobDrawer({
           {job.exit_code != null && <span>終了コード {job.exit_code}</span>}
           <span>開始 {formatDateTime(job.started_at)}</span>
           <span>{RESTART_LABEL[job.restart_policy] ?? job.restart_policy}</span>
+          <span>所有者 {job.owner || '共通'}</span>
         </div>
 
         <div ref={logRef} className="flex-1 overflow-auto bg-zinc-50 p-3">

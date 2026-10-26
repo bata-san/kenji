@@ -67,6 +67,21 @@ impl From<std::io::Error> for ApiError {
     }
 }
 
+impl From<crate::auth::UserError> for ApiError {
+    fn from(e: crate::auth::UserError) -> Self {
+        use crate::auth::UserError;
+        match e {
+            UserError::Invalid(m) => ApiError::BadRequest(m),
+            UserError::Conflict(m) => ApiError::Conflict(m),
+            UserError::NotFound => ApiError::NotFound,
+            UserError::LastAdmin => {
+                ApiError::Conflict("最後の管理者は削除または降格できません".into())
+            }
+            UserError::Other(e) => ApiError::Internal(e),
+        }
+    }
+}
+
 impl From<tokio::task::JoinError> for ApiError {
     fn from(e: tokio::task::JoinError) -> Self {
         ApiError::Internal(anyhow::Error::new(e))

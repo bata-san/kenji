@@ -49,6 +49,10 @@ pub struct JobDef {
     pub schedule: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Username that created the job. Empty for jobs created before multi-user
+    /// support; those remain manageable by any operator for compatibility.
+    #[serde(default)]
+    pub owner: String,
     pub created_at: DateTime<Utc>,
 }
 
@@ -73,6 +77,7 @@ pub struct JobView {
     pub restart_policy: RestartPolicy,
     pub schedule: Option<String>,
     pub tags: Vec<String>,
+    pub owner: String,
     pub status: JobStatus,
     pub pid: Option<u32>,
     pub exit_code: Option<i32>,
@@ -358,6 +363,7 @@ impl JobManager {
             restart_policy: req.restart_policy.unwrap_or(RestartPolicy::Never),
             schedule: req.schedule,
             tags: req.tags.unwrap_or_default(),
+            owner: user.to_string(),
             created_at: Utc::now(),
         };
         self.defs
@@ -394,7 +400,12 @@ impl JobManager {
         self.view(id)
     }
 
-    pub fn start(self: &Arc<Self>, user: &str, role: &str, id: &Uuid) -> Result<JobView, String> {
+    pub async fn start(
+        self: &Arc<Self>,
+        user: &str,
+        role: &str,
+        id: &Uuid,
+    ) -> Result<JobView, String> {
         let def = self
             .defs
             .read()
@@ -403,6 +414,7 @@ impl JobManager {
             .find(|d| d.id == *id)
             .cloned()
             .ok_or_else(|| "job not found".to_string())?;
+        ensure_can_manage(user, role, &def)?;
         let rt = self
             .runtime(id)
             .ok_or_else(|| "job not found".to_string())?;
@@ -421,7 +433,7 @@ impl JobManager {
                 spawned = true;
                 break;
             }
-            std::thread::sleep(Duration::from_millis(100));
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
         if !spawned {
             return Err("前回の停止処理が完了していません。数秒後に再試行してください".to_string());
@@ -438,6 +450,7 @@ impl JobManager {
             .find(|d| d.id == *id)
             .cloned()
             .ok_or_else(|| "job not found".to_string())?;
+        ensure_can_manage(user, role, &def)?;
         let rt = self
             .runtime(id)
             .ok_or_else(|| "job not found".to_string())?;
@@ -461,6 +474,7 @@ impl JobManager {
             .find(|d| d.id == *id)
             .cloned()
             .ok_or_else(|| "job not found".to_string())?;
+        ensure_can_manage(user, role, &def)?;
         let rt = self
             .runtime(id)
             .ok_or_else(|| "job not found".to_string())?;
@@ -542,6 +556,7 @@ impl JobManager {
             restart_policy: def.restart_policy,
             schedule: def.schedule,
             tags: def.tags,
+            owner: def.owner,
             status: *rt.status.read().unwrap_or_else(|e| e.into_inner()),
             pid: *rt.pid.read().unwrap_or_else(|e| e.into_inner()),
             exit_code: *rt.exit_code.read().unwrap_or_else(|e| e.into_inner()),
@@ -834,10 +849,32 @@ mod tests {
         // next fire should be within 5 minutes for a */5 schedule
         assert!(Utc::now().signed_duration_since(next).num_minutes() <= 5);
     }
+
+    #[test]
+    fn job_ownership_rules() {
+        assert!(can_manage("alice", "operator", "alice"));
+        assert!(can_manage("bob", "operator", ""));
+        assert!(!can_manage("bob", "operator", "alice"));
+        assert!(can_manage("admin", "admin", "alice"));
+    }
 }
 
 fn next_fire(schedule: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
     parse_cron(schedule).ok()?.after(&now).next()
+}
+
+/// Admins may manage every job. Operators may manage their own jobs and
+/// legacy/shared jobs (empty owner) but not jobs owned by another user.
+fn can_manage(user: &str, role: &str, owner: &str) -> bool {
+    role == "admin" || owner.is_empty() || owner == user
+}
+
+fn ensure_can_manage(user: &str, role: &str, def: &JobDef) -> Result<(), String> {
+    if can_manage(user, role, &def.owner) {
+        Ok(())
+    } else {
+        Err("このジョブを操作する権限がありません（作成者または管理者のみ）".to_string())
+    }
 }
 
 #[derive(Debug, Deserialize)]

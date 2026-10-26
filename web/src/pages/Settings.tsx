@@ -11,6 +11,8 @@ import {
   ScrollText,
   ShieldAlert,
   Trash2,
+  UserPlus,
+  Users,
 } from 'lucide-react';
 import {
   api,
@@ -20,9 +22,11 @@ import {
   type AuditEntry,
   type CreatedKey,
   type KeyInfo,
+  type Me,
   type Role,
   type Settings,
   type UpdateStatusInfo,
+  type UserInfo,
 } from '@/api';
 import { Badge, type BadgeProps } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -96,10 +100,15 @@ export default function Settings() {
   const [forbidden, setForbidden] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [keys, setKeys] = useState<KeyInfo[]>([]);
+  const [users, setUsers] = useState<UserInfo[]>([]);
+  const [me, setMe] = useState<Me | null>(null);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [tunnelBusy, setTunnelBusy] = useState(false);
   const [keyModalOpen, setKeyModalOpen] = useState(false);
+  const [userModalOpen, setUserModalOpen] = useState(false);
+  const [passwordTarget, setPasswordTarget] = useState<UserInfo | null>(null);
+  const [userBusy, setUserBusy] = useState<string | null>(null);
   const [updateInfo, setUpdateInfo] = useState<UpdateStatusInfo | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
   const [prefBusy, setPrefBusy] = useState<string | null>(null);
@@ -123,6 +132,19 @@ export default function Settings() {
     }
   }, []);
 
+  const loadUsers = useCallback(async (): Promise<void> => {
+    try {
+      const [res, meRes] = await Promise.all([
+        api<{ users: UserInfo[] }>('/api/users'),
+        api<Me>('/api/auth/me'),
+      ]);
+      setUsers(res.users);
+      setMe(meRes);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }, []);
+
   const loadUpdate = useCallback(async (): Promise<void> => {
     try {
       const res = await api<UpdateStatusInfo>('/api/update/status');
@@ -137,7 +159,7 @@ export default function Settings() {
       const s = await api<Settings>('/api/settings');
       setSettings(s);
       setError(null);
-      await Promise.all([loadKeys(), loadAudit(), loadUpdate()]);
+      await Promise.all([loadKeys(), loadUsers(), loadAudit(), loadUpdate()]);
     } catch (err) {
       if (err instanceof ApiRequestError && err.status === 403) {
         setForbidden(true);
@@ -145,7 +167,7 @@ export default function Settings() {
         setError(errorMessage(err));
       }
     }
-  }, [loadKeys, loadAudit, loadUpdate]);
+  }, [loadKeys, loadUsers, loadAudit, loadUpdate]);
 
   useEffect(() => {
     void refreshAll();
@@ -250,6 +272,46 @@ export default function Settings() {
     })();
   }
 
+  async function changeUserRole(user: UserInfo, role: Role): Promise<void> {
+    if (user.role === role) return;
+    if (
+      user.username === me?.username &&
+      role !== 'admin' &&
+      !confirm('自分自身を管理者から降格します。続けますか？')
+    ) {
+      return;
+    }
+    setUserBusy(`role:${user.id}`);
+    try {
+      await api(`/api/users/${encodeURIComponent(user.username)}/role`, {
+        method: 'PUT',
+        body: JSON.stringify({ role }),
+      });
+      await loadUsers();
+      setError(null);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setUserBusy(null);
+    }
+  }
+
+  function deleteUser(user: UserInfo): void {
+    if (!confirm(`ユーザー「${user.username}」を削除しますか？`)) return;
+    void (async () => {
+      setUserBusy(`delete:${user.id}`);
+      try {
+        await api(`/api/users/${encodeURIComponent(user.username)}`, { method: 'DELETE' });
+        await loadUsers();
+        setError(null);
+      } catch (err) {
+        setError(errorMessage(err));
+      } finally {
+        setUserBusy(null);
+      }
+    })();
+  }
+
   if (forbidden) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3">
@@ -287,6 +349,7 @@ export default function Settings() {
               <TabsTrigger value="update">アップデート</TabsTrigger>
               <TabsTrigger value="repair">AI診断・修復</TabsTrigger>
               <TabsTrigger value="keys">APIキー</TabsTrigger>
+              <TabsTrigger value="users">ユーザー</TabsTrigger>
               <TabsTrigger value="audit">監査ログ</TabsTrigger>
             </TabsList>
 
@@ -507,6 +570,89 @@ export default function Settings() {
               </Card>
             </TabsContent>
 
+            <TabsContent value="users" className="mt-3">
+              <Card className="overflow-hidden">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <Users className="h-3.5 w-3.5 text-muted-foreground" />
+                    ユーザー管理
+                  </CardTitle>
+                  <Button onClick={() => setUserModalOpen(true)}>
+                    <UserPlus className="h-3.5 w-3.5" />
+                    新規ユーザー
+                  </Button>
+                </CardHeader>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>ユーザー名</TableHead>
+                      <TableHead>ロール</TableHead>
+                      <TableHead>作成日時</TableHead>
+                      <TableHead>更新日時</TableHead>
+                      <TableHead className="w-24 text-right">操作</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {users.map((u) => (
+                      <TableRow key={u.id}>
+                        <TableCell className="font-medium text-zinc-700">
+                          {u.username}
+                          {me?.username === u.username && (
+                            <span className="ml-2 text-[10px] text-muted-foreground">(自分)</span>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <Select
+                            value={u.role}
+                            onValueChange={(v) => void changeUserRole(u, v as Role)}
+                            disabled={userBusy !== null}
+                          >
+                            <SelectTrigger className="h-7 w-32">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="viewer">viewer</SelectItem>
+                              <SelectItem value="operator">operator</SelectItem>
+                              <SelectItem value="admin">admin</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </TableCell>
+                        <TableCell className="whitespace-nowrap font-mono text-muted-foreground">
+                          {formatDateTime(u.created_at)}
+                        </TableCell>
+                        <TableCell className="whitespace-nowrap font-mono text-muted-foreground">
+                          {formatDateTime(u.updated_at)}
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex items-center justify-end gap-0.5">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              title="パスワード変更"
+                              onClick={() => setPasswordTarget(u)}
+                            >
+                              <KeyRound className="h-3.5 w-3.5" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="hover:bg-red-50 hover:text-red-600"
+                              title="削除"
+                              disabled={me?.username === u.username || userBusy === `delete:${u.id}`}
+                              onClick={() => deleteUser(u)}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+                {users.length === 0 && <EmptyState>ユーザーがいません</EmptyState>}
+              </Card>
+            </TabsContent>
+
             <TabsContent value="audit" className="mt-3">
               <Card className="overflow-hidden">
                 <CardHeader>
@@ -546,6 +692,16 @@ export default function Settings() {
         )}
 
         <KeyDialog open={keyModalOpen} onClose={() => setKeyModalOpen(false)} onCreated={() => void loadKeys()} />
+        <UserDialog
+          open={userModalOpen}
+          onClose={() => setUserModalOpen(false)}
+          onCreated={() => void loadUsers()}
+        />
+        <PasswordDialog
+          user={passwordTarget}
+          onClose={() => setPasswordTarget(null)}
+          onSaved={() => void loadUsers()}
+        />
       </div>
     </div>
   );
@@ -669,6 +825,189 @@ function KeyDialog({
             </div>
           </form>
         )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ============================================================
+// ユーザー作成ダイアログ
+// ============================================================
+
+function UserDialog({
+  open,
+  onClose,
+  onCreated,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [role, setRole] = useState<Role>('operator');
+  const [busy, setBusy] = useState(false);
+  const [serverError, setServerError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    setUsername('');
+    setPassword('');
+    setRole('operator');
+    setBusy(false);
+    setServerError(null);
+  }, [open]);
+
+  async function submit(e: FormEvent): Promise<void> {
+    e.preventDefault();
+    if (!username.trim()) {
+      setServerError('ユーザー名を入力してください');
+      return;
+    }
+    if (password.length < 6) {
+      setServerError('パスワードは6文字以上にしてください');
+      return;
+    }
+    setBusy(true);
+    setServerError(null);
+    try {
+      await api('/api/users', {
+        method: 'POST',
+        body: JSON.stringify({ username: username.trim(), password, role }),
+      });
+      onCreated();
+      onClose();
+    } catch (err) {
+      setServerError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>新規ユーザー</DialogTitle>
+        </DialogHeader>
+        <form className="space-y-3" onSubmit={(e) => void submit(e)}>
+          <Field label="ユーザー名" hint="英数字と . _ - @（1〜64文字）">
+            <Input
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              placeholder="taro"
+              autoFocus
+              autoComplete="off"
+            />
+          </Field>
+          <Field label="パスワード" hint="6文字以上">
+            <Input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              autoComplete="new-password"
+            />
+          </Field>
+          <Field label="ロール">
+            <Select value={role} onValueChange={(v) => setRole(v as Role)}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="viewer">viewer — 読み取り専用</SelectItem>
+                <SelectItem value="operator">operator — ジョブ実行・ターミナル・ファイル編集</SelectItem>
+                <SelectItem value="admin">admin — すべての管理操作</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+          {serverError && <ErrorBanner>{serverError}</ErrorBanner>}
+          <div className="flex justify-end gap-2 pt-1">
+            <Button type="button" variant="ghost" onClick={onClose}>
+              キャンセル
+            </Button>
+            <Button type="submit" loading={busy}>
+              作成
+            </Button>
+          </div>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ============================================================
+// パスワード変更ダイアログ
+// ============================================================
+
+function PasswordDialog({
+  user,
+  onClose,
+  onSaved,
+}: {
+  user: UserInfo | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [serverError, setServerError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!user) return;
+    setPassword('');
+    setBusy(false);
+    setServerError(null);
+  }, [user]);
+
+  async function submit(e: FormEvent): Promise<void> {
+    e.preventDefault();
+    if (!user) return;
+    if (password.length < 6) {
+      setServerError('パスワードは6文字以上にしてください');
+      return;
+    }
+    setBusy(true);
+    setServerError(null);
+    try {
+      await api(`/api/users/${encodeURIComponent(user.username)}/password`, {
+        method: 'PUT',
+        body: JSON.stringify({ password }),
+      });
+      onSaved();
+      onClose();
+    } catch (err) {
+      setServerError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={user !== null} onOpenChange={(o) => { if (!o) onClose(); }}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>パスワード変更 — {user?.username}</DialogTitle>
+        </DialogHeader>
+        <form className="space-y-3" onSubmit={(e) => void submit(e)}>
+          <Field label="新しいパスワード" hint="6文字以上">
+            <Input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              autoFocus
+              autoComplete="new-password"
+            />
+          </Field>
+          {serverError && <ErrorBanner>{serverError}</ErrorBanner>}
+          <div className="flex justify-end gap-2 pt-1">
+            <Button type="button" variant="ghost" onClick={onClose}>
+              キャンセル
+            </Button>
+            <Button type="submit" loading={busy}>
+              変更
+            </Button>
+          </div>
+        </form>
       </DialogContent>
     </Dialog>
   );

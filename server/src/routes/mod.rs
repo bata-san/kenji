@@ -4,6 +4,7 @@ pub mod files_routes;
 pub mod jobs_routes;
 pub mod system_routes;
 pub mod update_routes;
+pub mod user_routes;
 pub mod ws_routes;
 
 use std::collections::HashMap;
@@ -13,7 +14,7 @@ use axum::extract::FromRequestParts;
 use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE};
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use rust_embed::RustEmbed;
 use tower_http::catch_panic::CatchPanicLayer;
@@ -167,6 +168,16 @@ pub fn build_router(state: SharedState) -> Router {
             get(admin_routes::get_settings).put(admin_routes::put_settings),
         )
         .route("/api/audit", get(admin_routes::audit_list))
+        .route(
+            "/api/users",
+            get(user_routes::list).post(user_routes::create),
+        )
+        .route("/api/users/{username}", delete(user_routes::delete_user))
+        .route(
+            "/api/users/{username}/password",
+            put(user_routes::set_password),
+        )
+        .route("/api/users/{username}/role", put(user_routes::set_role))
         .route("/api/repair/diagnose", post(admin_routes::diagnose))
         .route("/api/update/status", get(update_routes::status))
         .route("/api/update/check", post(update_routes::check))

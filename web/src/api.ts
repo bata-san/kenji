@@ -35,6 +35,16 @@ export interface KeyInfo {
   last_used_at: string | null;
 }
 
+/** GET /api/users — SQLite のユーザー情報 */
+export interface UserInfo {
+  id: number;
+  username: string;
+  role: Role;
+  created_at: string;
+  updated_at: string;
+  disabled: boolean;
+}
+
 /** POST /api/auth/keys の応答（key はこの時だけ返る） */
 export interface CreatedKey extends KeyInfo {
   key: string;
@@ -107,6 +117,7 @@ export interface Job {
   restart_policy: RestartPolicy;
   schedule: string | null;
   tags: string[];
+  owner: string;
   status: JobStatus;
   pid: number | null;
   exit_code: number | null;
