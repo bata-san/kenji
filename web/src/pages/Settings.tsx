@@ -407,6 +407,27 @@ export default function Settings() {
                   </Button>
                 </div>
               </Card>
+              <Card>
+                <CardHeader>
+                  <CardTitle>ngrok（Windows サービス）</CardTitle>
+                </CardHeader>
+                <div className="divide-y divide-zinc-200/60">
+                  <InfoRow label="サービス状態">
+                    {settings.ngrok?.status === 'running' ? '稼働中' :
+                     settings.ngrok?.status === 'stopped' ? '停止中' :
+                     settings.ngrok?.status === 'starting' ? '起動中' :
+                     settings.ngrok?.status === 'stopping' ? '停止処理中' :
+                     settings.ngrok?.status === 'pending' ? '状態遷移中' :
+                     settings.ngrok?.status === 'not_installed' ? '未登録' :
+                     settings.ngrok?.status === 'unsupported' ? 'Windows のみ対応' : '状態を取得できません'}
+                  </InfoRow>
+                  <InfoRow label="起動方式">Windows サービス（Kenjiとは独立）</InfoRow>
+                </div>
+                <p className="px-3.5 pb-3 text-xs text-muted-foreground">
+                  ngrok の設定・公開URLはngrok側で管理されます。Kenjiから認証トークンは読み取りません。
+                  ローカルの管理者PowerShellから scripts/install-windows-services.ps1 で初期登録できます。
+                </p>
+              </Card>
             </TabsContent>
 
             <TabsContent value="repair" className="mt-3 space-y-3">
