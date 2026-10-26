@@ -43,6 +43,25 @@ fn user_workspace_root(state: &SharedState, ctx: &AuthCtx) -> ApiResult<PathBuf>
     })
 }
 
+fn data_dir(state: &SharedState) -> PathBuf {
+    state
+        .config
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .data_dir
+        .clone()
+}
+
+fn parse_scope(ctx: &AuthCtx, raw: Option<&str>) -> ApiResult<files::FsScope> {
+    let scope = files::FsScope::parse(raw).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    if scope == files::FsScope::System {
+        // Whole-PC access is the highest privilege in the file API. Operators
+        // and viewers stay inside their dedicated workspace.
+        ctx.require(Role::Admin)?;
+    }
+    Ok(scope)
+}
+
 fn normalize(rel: &str) -> String {
     let t = rel.trim_start_matches('/');
     let t = t.replace('\\', "/");
@@ -53,9 +72,15 @@ fn normalize(rel: &str) -> String {
     }
 }
 
+fn is_virtual_root(path: &str) -> bool {
+    let trimmed = path.trim();
+    trimmed.is_empty() || trimmed == "/" || trimmed == "\\"
+}
+
 #[derive(Deserialize)]
 pub struct PathQuery {
     pub path: Option<String>,
+    pub scope: Option<String>,
 }
 
 fn resolve_in_root(root: &Path, rel: &str) -> ApiResult<(PathBuf, String)> {
@@ -64,14 +89,32 @@ fn resolve_in_root(root: &Path, rel: &str) -> ApiResult<(PathBuf, String)> {
     Ok((p, normalize(rel)))
 }
 
+/// Resolve a request path in either the per-user workspace or, for admins,
+/// the whole local filesystem. The first tuple element is the workspace root
+/// when the scope is `workspace` (used for defense-in-depth checks).
 fn resolve_checked(
     state: &SharedState,
     ctx: &AuthCtx,
     rel: &str,
-) -> ApiResult<(PathBuf, PathBuf, String)> {
-    let root = user_workspace_root(state, ctx)?;
-    let (p, norm) = resolve_in_root(&root, rel)?;
-    Ok((root, p, norm))
+    scope: files::FsScope,
+) -> ApiResult<(Option<PathBuf>, PathBuf, String)> {
+    match scope {
+        files::FsScope::Workspace => {
+            let root = user_workspace_root(state, ctx)?;
+            let (p, norm) = resolve_in_root(&root, rel)?;
+            let p = files::ensure_within(&root, &p).map_err(|_| ApiError::NotFound)?;
+            Ok((Some(root), p, norm))
+        }
+        files::FsScope::System => {
+            let (p, norm) =
+                files::resolve_system_path(rel).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+            Ok((None, p, norm))
+        }
+    }
+}
+
+fn audit_detail(scope: files::FsScope, detail: &str) -> String {
+    format!("[{}] {detail}", scope.as_str())
 }
 
 // ---- list ----
@@ -84,8 +127,33 @@ pub async fn list(
     Query(q): Query<PathQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     ctx.require(Role::Viewer)?;
-    let (root, dir, norm) = resolve_checked(&state, &ctx, q.path.as_deref().unwrap_or("/"))?;
-    let dir = files::ensure_within(&root, &dir).map_err(|_| ApiError::NotFound)?;
+    let scope = parse_scope(&ctx, q.scope.as_deref())?;
+    let requested = q.path.as_deref().unwrap_or("/");
+
+    // In system scope the virtual root is a drive list, not a directory.
+    if scope == files::FsScope::System && is_virtual_root(requested) {
+        let entries: Vec<serde_json::Value> = files::list_drives()
+            .into_iter()
+            .map(|name| {
+                serde_json::json!({
+                    "name": name,
+                    "kind": "drive",
+                    "size": null,
+                    "modified": null
+                })
+            })
+            .collect();
+        return Ok(Json(serde_json::json!({
+            "path": "/",
+            "scope": scope.as_str(),
+            "entries": entries
+        })));
+    }
+
+    let (root, dir, norm) = resolve_checked(&state, &ctx, requested, scope)?;
+    if let Some(root) = &root {
+        files::ensure_within(root, &dir).map_err(|_| ApiError::NotFound)?;
+    }
 
     let mut entries: Vec<FsEntry> = Vec::new();
     let mut rd = tokio::fs::read_dir(&dir)
@@ -117,7 +185,11 @@ pub async fn list(
             serde_json::json!({"name": name, "kind": kind, "size": size, "modified": modified})
         })
         .collect();
-    Ok(Json(serde_json::json!({ "path": norm, "entries": items })))
+    Ok(Json(serde_json::json!({
+        "path": norm,
+        "scope": scope.as_str(),
+        "entries": items
+    })))
 }
 
 // ---- mkdir ----
@@ -125,6 +197,8 @@ pub async fn list(
 #[derive(Deserialize)]
 pub struct PathBody {
     pub path: String,
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 pub async fn mkdir(
@@ -133,14 +207,23 @@ pub async fn mkdir(
     Json(body): Json<PathBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     ctx.require(Role::Operator)?;
-    let (root, dir, norm) = resolve_checked(&state, &ctx, &body.path)?;
-    files::ensure_within(&root, &dir).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let scope = parse_scope(&ctx, body.scope.as_deref())?;
+    let (root, dir, norm) = resolve_checked(&state, &ctx, &body.path, scope)?;
+    if let Some(root) = &root {
+        files::ensure_within(root, &dir).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    } else {
+        files::ensure_system_write_allowed(&dir, &data_dir(&state))
+            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    }
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(ApiError::from)?;
-    state
-        .audit
-        .log(&ctx.username, role_str(&ctx.role), "file_mkdir", &norm);
+    state.audit.log(
+        &ctx.username,
+        role_str(&ctx.role),
+        "file_mkdir",
+        &audit_detail(scope, &norm),
+    );
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -150,6 +233,8 @@ pub async fn mkdir(
 pub struct MoveBody {
     pub from: String,
     pub to: String,
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 pub async fn r#move(
@@ -158,12 +243,21 @@ pub async fn r#move(
     Json(body): Json<MoveBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     ctx.require(Role::Operator)?;
-    let (root, from, from_norm) = resolve_checked(&state, &ctx, &body.from)?;
-    let (to, to_norm) = resolve_in_root(&root, &body.to)?;
-    let from = files::ensure_within(&root, &from).map_err(|_| ApiError::NotFound)?;
-    let to = files::ensure_within(&root, &to).map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    files::ensure_not_root(&root, &from).map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    files::ensure_not_root(&root, &to).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let scope = parse_scope(&ctx, body.scope.as_deref())?;
+    let (root, from, from_norm) = resolve_checked(&state, &ctx, &body.from, scope)?;
+    let (_, to, to_norm) = resolve_checked(&state, &ctx, &body.to, scope)?;
+    if let Some(root) = &root {
+        files::ensure_not_root(root, &from).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        files::ensure_not_root(root, &to).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    } else {
+        let data = data_dir(&state);
+        files::ensure_system_destructive_allowed(&from, &data)
+            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        files::ensure_system_destructive_allowed(&to, &data)
+            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        files::ensure_system_write_allowed(&to, &data)
+            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    }
     tokio::fs::rename(&from, &to)
         .await
         .map_err(ApiError::from)?;
@@ -171,7 +265,7 @@ pub async fn r#move(
         &ctx.username,
         role_str(&ctx.role),
         "file_move",
-        &format!("{from_norm} → {to_norm}"),
+        &audit_detail(scope, &format!("{from_norm} → {to_norm}")),
     );
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -184,9 +278,14 @@ pub async fn delete(
     Query(q): Query<PathQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     ctx.require(Role::Operator)?;
-    let (root, p, norm) = resolve_checked(&state, &ctx, q.path.as_deref().unwrap_or("/"))?;
-    let p = files::ensure_within(&root, &p).map_err(|_| ApiError::NotFound)?;
-    files::ensure_not_root(&root, &p).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let scope = parse_scope(&ctx, q.scope.as_deref())?;
+    let (root, p, norm) = resolve_checked(&state, &ctx, q.path.as_deref().unwrap_or("/"), scope)?;
+    if let Some(root) = &root {
+        files::ensure_not_root(root, &p).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    } else {
+        files::ensure_system_destructive_allowed(&p, &data_dir(&state))
+            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    }
     let meta = tokio::fs::metadata(&p)
         .await
         .map_err(|_| ApiError::NotFound)?;
@@ -198,9 +297,12 @@ pub async fn delete(
     } else {
         tokio::fs::remove_file(&p).await.map_err(ApiError::from)?;
     }
-    state
-        .audit
-        .log(&ctx.username, role_str(&ctx.role), "file_delete", &norm);
+    state.audit.log(
+        &ctx.username,
+        role_str(&ctx.role),
+        "file_delete",
+        &audit_detail(scope, &norm),
+    );
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -210,6 +312,7 @@ pub async fn delete(
 pub struct DownloadQuery {
     pub path: String,
     pub token: Option<String>,
+    pub scope: Option<String>,
 }
 
 fn content_disposition(name: &str) -> String {
@@ -246,10 +349,9 @@ pub async fn download(
     };
     let ctx = ctx.ok_or(ApiError::Unauthorized)?;
     ctx.require(Role::Viewer)?;
+    let scope = parse_scope(&ctx, q.scope.as_deref())?;
 
-    let root = user_workspace_root(&state, &ctx)?;
-    let (p, norm) = resolve_in_root(&root, &q.path)?;
-    let p = files::ensure_within(&root, &p).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let (_root, p, norm) = resolve_checked(&state, &ctx, &q.path, scope)?;
     let meta = tokio::fs::metadata(&p)
         .await
         .map_err(|_| ApiError::NotFound)?;
@@ -269,9 +371,12 @@ pub async fn download(
         .header(header::CONTENT_DISPOSITION, content_disposition(&name))
         .body(body)
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("{e}")))?;
-    state
-        .audit
-        .log(&ctx.username, role_str(&ctx.role), "file_download", &norm);
+    state.audit.log(
+        &ctx.username,
+        role_str(&ctx.role),
+        "file_download",
+        &audit_detail(scope, &norm),
+    );
     Ok(resp)
 }
 
@@ -284,9 +389,18 @@ pub async fn upload(
     mut multipart: Multipart,
 ) -> ApiResult<Json<serde_json::Value>> {
     ctx.require(Role::Operator)?;
-    let (root, dir, norm) = resolve_checked(&state, &ctx, q.path.as_deref().unwrap_or("/"))?;
-    let dir = files::ensure_within(&root, &dir).map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    let _ = norm;
+    let scope = parse_scope(&ctx, q.scope.as_deref())?;
+    let (root, dir, norm) = resolve_checked(&state, &ctx, q.path.as_deref().unwrap_or("/"), scope)?;
+    let dir = match &root {
+        Some(root) => {
+            files::ensure_within(root, &dir).map_err(|e| ApiError::BadRequest(e.to_string()))?
+        }
+        None => {
+            files::ensure_system_write_allowed(&dir, &data_dir(&state))
+                .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+            dir
+        }
+    };
 
     let mut saved: Vec<serde_json::Value> = Vec::new();
     let mut total_size = 0u64;
@@ -308,6 +422,10 @@ pub async fn upload(
         let orig = field.file_name().unwrap_or("upload.bin").to_string();
         let safe = files::safe_file_name(&orig).map_err(|e| ApiError::BadRequest(e.to_string()))?;
         let dest = dir.join(&safe);
+        if root.is_none() {
+            files::ensure_system_write_allowed(&dest, &data_dir(&state))
+                .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        }
         // Never follow a pre-existing symlink or overwrite a directory.
         match tokio::fs::symlink_metadata(&dest).await {
             Ok(meta) if meta.file_type().is_symlink() || meta.is_dir() => {
@@ -357,7 +475,12 @@ pub async fn upload(
         let size = upload_result?;
         // Recheck parents and destination, but path-based checks cannot eliminate
         // concurrent parent/junction swaps (see files::ensure_within).
-        files::ensure_within(&root, &dir).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        if let Some(root) = &root {
+            files::ensure_within(root, &dir).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        } else {
+            files::ensure_system_write_allowed(&dest, &data_dir(&state))
+                .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+        }
         match tokio::fs::symlink_metadata(&dest).await {
             Ok(meta) if meta.file_type().is_symlink() || meta.is_dir() => {
                 return Err(ApiError::BadRequest(
@@ -378,11 +501,7 @@ pub async fn upload(
         &ctx.username,
         role_str(&ctx.role),
         "file_upload",
-        &format!(
-            "{} ({} files)",
-            normalize(&q.path.unwrap_or_default()),
-            saved.len()
-        ),
+        &audit_detail(scope, &format!("{norm} ({} files)", saved.len())),
     );
     Ok(Json(serde_json::json!({ "ok": true, "saved": saved })))
 }

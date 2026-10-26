@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{anyhow, Result};
@@ -5,6 +6,33 @@ use anyhow::{anyhow, Result};
 /// Workspace folder shared by API-key principals (`key:<name>`), whose
 /// synthetic names are not valid Windows folder names.
 pub const SHARED_USER_FOLDER: &str = "_shared";
+
+/// File API scope. `Workspace` is the per-user sandbox. `System` is the whole
+/// local PC and is restricted to administrators by the route layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FsScope {
+    Workspace,
+    System,
+}
+
+impl FsScope {
+    pub fn parse(raw: Option<&str>) -> Result<FsScope> {
+        match raw.map(str::trim).filter(|s| !s.is_empty()) {
+            None | Some("workspace") => Ok(FsScope::Workspace),
+            Some("system") => Ok(FsScope::System),
+            Some(other) => Err(anyhow!(
+                "scope は workspace または system を指定してください: {other}"
+            )),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FsScope::Workspace => "workspace",
+            FsScope::System => "system",
+        }
+    }
+}
 
 /// True when the principal is an API key rather than a user database account.
 pub fn is_api_key_principal(username: &str) -> bool {
@@ -159,6 +187,240 @@ pub fn ensure_not_root(root: &Path, path: &Path) -> Result<()> {
         return Err(anyhow!("workspace root cannot be moved or deleted"));
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// System-wide filesystem scope (administrators only)
+// ---------------------------------------------------------------------------
+
+/// Normalize a system-scope path to the virtual form used by the API:
+/// `/` for the drive list, `/C:` for a drive root, `/C:/Users/foo` below it.
+/// Absolute native paths (`C:\Users\foo`, `C:/Users/foo`) are accepted too.
+pub fn normalize_system_path(input: &str) -> Result<String> {
+    // Only a wholly blank input is the virtual root. Do not trim components:
+    // Windows silently strips trailing spaces/dots, so `C:\report ` aliases
+    // `C:\report` and must be rejected by safe_file_name instead.
+    if input.trim().is_empty() || input == "/" || input == "\\" {
+        return Ok("/".to_string());
+    }
+    let replaced = input.replace('\\', "/");
+    // Reject UNC and device namespaces. Local drives only: network shares can
+    // still be mapped to a drive by an administrator.
+    if replaced.starts_with("//") || replaced.starts_with("/?/") || replaced.starts_with("/./") {
+        return Err(anyhow!(
+            "UNC/device paths are not supported in system scope"
+        ));
+    }
+    let body = replaced.trim_start_matches('/');
+    let bytes = body.as_bytes();
+    if bytes.len() < 2 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' {
+        return Err(anyhow!(
+            "system scope requires an absolute drive path like C:\\Users"
+        ));
+    }
+    if bytes.len() > 2 && bytes[2] != b'/' {
+        return Err(anyhow!("drive-relative paths are not allowed"));
+    }
+    let drive = (bytes[0] as char).to_ascii_uppercase();
+    let rest = if body.len() > 3 { &body[3..] } else { "" };
+    let mut parts = Vec::new();
+    for part in rest.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            return Err(anyhow!("path traversal rejected"));
+        }
+        safe_file_name(part)?;
+        parts.push(part);
+    }
+    if parts.is_empty() {
+        Ok(format!("/{drive}:"))
+    } else {
+        Ok(format!("/{drive}:/{}", parts.join("/")))
+    }
+}
+
+/// Convert a normalized system path (`/C:/Users/foo`) to a native path
+/// (`C:\Users\foo`). The virtual root `/` is not a filesystem path.
+pub fn system_path_to_native(normalized: &str) -> Result<PathBuf> {
+    if normalized == "/" {
+        return Err(anyhow!("the system root is virtual"));
+    }
+    let body = normalized.trim_start_matches('/');
+    let bytes = body.as_bytes();
+    if bytes.len() < 2 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' {
+        return Err(anyhow!("invalid system path"));
+    }
+    let drive = (bytes[0] as char).to_ascii_uppercase();
+    let mut path = PathBuf::from(format!("{drive}:\\"));
+    if bytes.len() > 2 {
+        if bytes[2] != b'/' {
+            return Err(anyhow!("invalid system path"));
+        }
+        for part in body[3..].split('/').filter(|part| !part.is_empty()) {
+            safe_file_name(part)?;
+            path.push(part);
+        }
+    }
+    Ok(path)
+}
+
+/// Resolve an existing system path (or the nearest existing ancestor for a
+/// path that is about to be created) and return its canonical native form plus
+/// the normalized API path.
+pub fn resolve_system_path(input: &str) -> Result<(PathBuf, String)> {
+    let normalized = normalize_system_path(input)?;
+    if normalized == "/" {
+        return Err(anyhow!("the system root is virtual"));
+    }
+    let native = system_path_to_native(&normalized)?;
+    let resolved = resolve_existing_or_parent(&native)?;
+    Ok((resolved, normalized))
+}
+
+fn resolve_existing_or_parent(path: &Path) -> Result<PathBuf> {
+    let mut ancestor = path;
+    let mut suffix: Vec<OsString> = Vec::new();
+    loop {
+        match std::fs::canonicalize(ancestor) {
+            Ok(mut resolved) => {
+                for component in suffix.iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let name = ancestor
+                    .file_name()
+                    .ok_or_else(|| anyhow!("path has no existing ancestor"))?;
+                suffix.push(name.to_os_string());
+                ancestor = ancestor
+                    .parent()
+                    .ok_or_else(|| anyhow!("path has no existing ancestor"))?;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
+/// Human-readable path with the Windows verbatim prefix removed.
+pub fn display_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        text.into_owned()
+    }
+}
+
+fn comparable_path(path: &Path) -> String {
+    display_path(path)
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_uppercase()
+}
+
+fn split_drive(key: &str) -> Option<(&str, &str)> {
+    let bytes = key.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_uppercase() && bytes[1] == b':' {
+        Some((&key[..2], &key[2..]))
+    } else {
+        None
+    }
+}
+
+/// Critical roots that must not be deleted, renamed, or moved as a whole.
+/// Their contents remain reachable; this only prevents catastrophic mistakes.
+pub fn is_protected_root(path: &Path) -> bool {
+    let key = comparable_path(path);
+    let Some((_drive, rest)) = split_drive(&key) else {
+        return false;
+    };
+    if rest.is_empty() {
+        return true; // drive root, e.g. C:\
+    }
+    const PROTECTED: &[&str] = &[
+        r"\WINDOWS",
+        r"\PROGRAM FILES",
+        r"\PROGRAM FILES (X86)",
+        r"\PROGRAMDATA",
+        r"\USERS",
+        r"\$RECYCLE.BIN",
+        r"\SYSTEM VOLUME INFORMATION",
+        r"\RECOVERY",
+        r"\BOOT",
+        r"\EFI",
+        r"\PROGRAMDATA\KENJI",
+    ];
+    if PROTECTED.contains(&rest) {
+        return true;
+    }
+    // A user profile root (C:\Users\<name>) is protected; its contents are not.
+    if let Some(profile) = rest.strip_prefix(r"\USERS\") {
+        if !profile.is_empty() && !profile.contains('\\') {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_sensitive_data_file(data_dir: &Path, path: &Path) -> bool {
+    let dir = comparable_path(data_dir);
+    let key = comparable_path(path);
+    let Some(rest) = key.strip_prefix(&format!("{dir}\\")) else {
+        return false;
+    };
+    matches!(rest, "AUTH.JSON" | "CONFIG.JSON" | "JOBS.JSON")
+        || rest.starts_with("USERS.DB")
+        || rest.starts_with("AUTH.JSON")
+}
+
+/// Guard destructive system-scope operations against the OS and Kenji itself.
+pub fn ensure_system_destructive_allowed(path: &Path, data_dir: &Path) -> Result<()> {
+    if is_protected_root(path) {
+        return Err(anyhow!(
+            "このパスは重要なシステム領域のため、削除・移動できません"
+        ));
+    }
+    if comparable_path(path) == comparable_path(data_dir) {
+        return Err(anyhow!("Kenji のデータディレクトリは削除・移動できません"));
+    }
+    if is_sensitive_data_file(data_dir, path) {
+        return Err(anyhow!("Kenji の機密ファイルは削除・移動できません"));
+    }
+    Ok(())
+}
+
+/// Guard writes (upload/mkdir/move destination) in system scope.
+pub fn ensure_system_write_allowed(path: &Path, data_dir: &Path) -> Result<()> {
+    if is_sensitive_data_file(data_dir, path) {
+        return Err(anyhow!("Kenji の機密ファイルは上書きできません"));
+    }
+    Ok(())
+}
+
+/// Drive letters visible to the service account, e.g. `["C:", "D:"]`.
+pub fn list_drives() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        (b'A'..=b'Z')
+            .filter_map(|byte| {
+                let letter = byte as char;
+                if PathBuf::from(format!("{letter}:\\")).is_dir() {
+                    Some(format!("{letter}:"))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+    #[cfg(not(windows))]
+    {
+        vec!["/".to_string()]
+    }
 }
 
 /// A safe single path component for a client-supplied file name.
@@ -369,5 +631,114 @@ mod tests {
         assert!(resolved.ends_with("new/subdir"));
         assert!(resolved.starts_with(std::fs::canonicalize(&root).unwrap()));
         assert!(ensure_within(&root, &temp.path().join("outside.txt")).is_err());
+    }
+
+    #[test]
+    fn system_paths_are_normalized_and_absolute() {
+        assert_eq!(normalize_system_path("/").unwrap(), "/");
+        assert_eq!(normalize_system_path("").unwrap(), "/");
+        assert_eq!(normalize_system_path("/C:").unwrap(), "/C:");
+        assert_eq!(normalize_system_path("c:\\").unwrap(), "/C:");
+        assert_eq!(
+            normalize_system_path("/c:/Users/foo").unwrap(),
+            "/C:/Users/foo"
+        );
+        assert_eq!(
+            normalize_system_path(r"C:\Users\foo").unwrap(),
+            "/C:/Users/foo"
+        );
+        assert_eq!(
+            normalize_system_path("C:/Users//foo/./bar/").unwrap(),
+            "/C:/Users/foo/bar"
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            system_path_to_native("/C:/Users/foo").unwrap(),
+            PathBuf::from(r"C:\Users\foo")
+        );
+    }
+
+    #[test]
+    fn system_paths_reject_escapes_and_devices() {
+        for bad in [
+            "../foo",
+            "C:foo",
+            "C:/foo/../bar",
+            r"\\?\C:\Windows",
+            r"\\.\C:\Windows",
+            r"\\server\share",
+            "C:/CON",
+            "C:/foo:bar",
+            "C:/report.",
+            "C:/report ",
+            "D:/ok", // drive may not exist, but normalization itself is valid
+        ] {
+            let normalized = normalize_system_path(bad);
+            if bad == "D:/ok" {
+                assert!(normalized.is_ok(), "{bad:?}");
+            } else {
+                assert!(normalized.is_err(), "{bad:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn protected_roots_cover_os_and_user_profiles() {
+        for protected in [
+            r"C:\",
+            r"C:\Windows",
+            r"C:\Program Files",
+            r"C:\ProgramData",
+            r"C:\ProgramData\kenji",
+            r"C:\Users",
+            r"C:\Users\alice",
+            r"D:\Windows",
+        ] {
+            assert!(is_protected_root(Path::new(protected)), "{protected:?}");
+        }
+        for allowed in [
+            r"C:\Windows\System32\drivers\etc\hosts",
+            r"C:\Users\alice\Desktop",
+            r"C:\ProgramData\kenji\workspace\alice",
+            r"C:\ProgramData\kenji\logs",
+        ] {
+            assert!(!is_protected_root(Path::new(allowed)), "{allowed:?}");
+        }
+    }
+
+    #[test]
+    fn sensitive_kenji_files_cannot_be_destroyed() {
+        let data = Path::new(r"C:\ProgramData\kenji");
+        for sensitive in [
+            r"C:\ProgramData\kenji\auth.json",
+            r"C:\ProgramData\kenji\auth.json.bak",
+            r"C:\ProgramData\kenji\users.db",
+            r"C:\ProgramData\kenji\users.db-wal",
+            r"C:\ProgramData\kenji\users.db-shm",
+            r"C:\ProgramData\kenji\users.db-journal",
+            r"C:\ProgramData\kenji\users.db.backup",
+            r"C:\ProgramData\kenji\config.json",
+            r"C:\ProgramData\kenji\jobs.json",
+        ] {
+            assert!(
+                ensure_system_destructive_allowed(Path::new(sensitive), data).is_err(),
+                "{sensitive:?}"
+            );
+            assert!(
+                ensure_system_write_allowed(Path::new(sensitive), data).is_err(),
+                "{sensitive:?}"
+            );
+        }
+        assert!(ensure_system_write_allowed(
+            Path::new(r"C:\ProgramData\kenji\workspace\alice\a.txt"),
+            data
+        )
+        .is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn drive_list_contains_system_drive() {
+        assert!(list_drives().iter().any(|d| d == "C:"));
     }
 }

@@ -5,9 +5,11 @@ import {
   File as FileIcon,
   Folder,
   FolderPlus,
+  HardDrive,
   Loader2,
   Pencil,
   RefreshCw,
+  ShieldAlert,
   Trash2,
   Upload,
 } from 'lucide-react';
@@ -19,6 +21,8 @@ import {
   getToken,
   type FileEntry,
   type FileList,
+  type FileScope,
+  type Me,
 } from '@/api';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -34,15 +38,35 @@ import {
 import { EmptyState, ErrorBanner, PageHeader, useConfirm } from '@/components/kit';
 
 function sortEntries(list: FileEntry[]): FileEntry[] {
+  const rank = (kind: FileEntry['kind']): number =>
+    kind === 'drive' ? 0 : kind === 'dir' ? 1 : 2;
   return [...list].sort((a, b) => {
-    if (a.kind !== b.kind) return a.kind === 'dir' ? -1 : 1;
+    if (a.kind !== b.kind) return rank(a.kind) - rank(b.kind);
     return a.name.localeCompare(b.name, 'ja');
   });
 }
 
-function normalizePath(p: string): string {
+function normalizePath(p: string, scope: FileScope, currentDir = '/'): string {
   let s = p.trim();
   if (s === '') return '/';
+  s = s.replace(/\\/g, '/');
+  if (scope === 'system') {
+    if (s === '/') return '/';
+    if (/^[A-Za-z]:($|\/)/.test(s)) {
+      s = `/${s}`;
+    } else {
+      const drive = currentDir.match(/^\/[A-Za-z]:/)?.[0];
+      if (drive) {
+        s = s.startsWith('/') ? `${drive}${s}` : `${drive}/${s}`;
+      } else if (!s.startsWith('/')) {
+        s = `/${s}`;
+      }
+    }
+    s = s.replace(/\/{2,}/g, '/');
+    s = s.replace(/^\/([A-Za-z]):/, (_match, drive: string) => `/${drive.toUpperCase()}:`);
+    if (s.length > 1 && s.endsWith('/')) s = s.slice(0, -1);
+    return s;
+  }
   if (!s.startsWith('/')) s = `/${s}`;
   s = s.replace(/\/{2,}/g, '/');
   if (s.length > 1 && s.endsWith('/')) s = s.slice(0, -1);
@@ -53,8 +77,21 @@ function joinPath(dir: string, name: string): string {
   return dir === '/' ? `/${name}` : `${dir}/${name}`;
 }
 
-function crumbs(path: string): Array<{ label: string; path: string }> {
-  const items: Array<{ label: string; path: string }> = [{ label: 'マイワークスペース', path: '/' }];
+function crumbs(path: string, scope: FileScope): Array<{ label: string; path: string }> {
+  const rootLabel = scope === 'system' ? 'PC全体' : 'マイワークスペース';
+  const items: Array<{ label: string; path: string }> = [{ label: rootLabel, path: '/' }];
+  if (scope === 'system') {
+    const match = path.match(/^\/([A-Za-z]):(?:\/(.*))?$/);
+    if (!match) return items;
+    const drive = `${match[1].toUpperCase()}:`;
+    items.push({ label: drive, path: `/${drive}` });
+    let cur = `/${drive}`;
+    for (const part of (match[2] ?? '').split('/').filter(Boolean)) {
+      cur += `/${part}`;
+      items.push({ label: part, path: cur });
+    }
+    return items;
+  }
   let cur = '';
   for (const part of path.split('/').filter(Boolean)) {
     cur += `/${part}`;
@@ -65,6 +102,8 @@ function crumbs(path: string): Array<{ label: string; path: string }> {
 
 export default function Files() {
   const confirm = useConfirm();
+  const [me, setMe] = useState<Me | null>(null);
+  const [scope, setScope] = useState<FileScope>('workspace');
   const [dir, setDir] = useState('/');
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -73,10 +112,18 @@ export default function Files() {
   const [uploading, setUploading] = useState<{ done: number; total: number } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const load = useCallback(async (path: string): Promise<void> => {
+  useEffect(() => {
+    void api<Me>('/api/auth/me')
+      .then(setMe)
+      .catch(() => setMe(null));
+  }, []);
+
+  const load = useCallback(async (path: string, currentScope: FileScope): Promise<void> => {
     setLoading(true);
     try {
-      const res = await api<FileList>(`/api/files/list?path=${encodeURIComponent(path)}`);
+      const res = await api<FileList>(
+        `/api/files/list?path=${encodeURIComponent(path)}&scope=${currentScope}`,
+      );
       setEntries(sortEntries(res.entries));
       setError(null);
     } catch (err) {
@@ -87,15 +134,23 @@ export default function Files() {
   }, []);
 
   useEffect(() => {
-    void load(dir);
-  }, [dir, load]);
+    void load(dir, scope);
+  }, [dir, scope, load]);
 
   useEffect(() => {
     setPathInput(dir);
   }, [dir]);
 
+  function switchScope(next: FileScope): void {
+    if (next === scope) return;
+    setScope(next);
+    setDir('/');
+    setEntries([]);
+    setError(null);
+  }
+
   function go(path: string): void {
-    setDir(normalizePath(path));
+    setDir(normalizePath(path, scope, dir));
   }
 
   function onPathInputKeyDown(e: KeyboardEvent<HTMLInputElement>): void {
@@ -106,15 +161,18 @@ export default function Files() {
     const name = window.prompt('新規フォルダ名を入力してください', '');
     if (name === null) return;
     const clean = name.trim();
-    if (clean === '' || clean.includes('/')) {
+    if (clean === '' || clean.includes('/') || clean.includes('\\')) {
       setError('フォルダ名が不正です');
       return;
     }
     void (async () => {
       try {
-        await api('/api/files/mkdir', { method: 'POST', body: JSON.stringify({ path: joinPath(dir, clean) }) });
+        await api('/api/files/mkdir', {
+          method: 'POST',
+          body: JSON.stringify({ path: joinPath(dir, clean), scope }),
+        });
         setError(null);
-        await load(dir);
+        await load(dir, scope);
       } catch (err) {
         setError(errorMessage(err));
       }
@@ -125,15 +183,19 @@ export default function Files() {
     const name = window.prompt('新しい名前を入力してください', entry.name);
     if (name === null) return;
     const clean = name.trim();
-    if (clean === '' || clean === entry.name || clean.includes('/')) return;
+    if (clean === '' || clean === entry.name || clean.includes('/') || clean.includes('\\')) return;
     void (async () => {
       try {
         await api('/api/files/move', {
           method: 'POST',
-          body: JSON.stringify({ from: joinPath(dir, entry.name), to: joinPath(dir, clean) }),
+          body: JSON.stringify({
+            from: joinPath(dir, entry.name),
+            to: joinPath(dir, clean),
+            scope,
+          }),
         });
         setError(null);
-        await load(dir);
+        await load(dir, scope);
       } catch (err) {
         setError(errorMessage(err));
       }
@@ -141,15 +203,21 @@ export default function Files() {
   }
 
   function remove(entry: FileEntry): void {
+    if (entry.kind === 'drive') return;
     const suffix = entry.kind === 'dir' ? '（フォルダ内のファイルもすべて削除されます）' : '';
-    if (!confirm(`「${entry.name}」を削除しますか？${suffix}`)) return;
+    const warning =
+      scope === 'system'
+        ? '\n\nPC全体モードです。システムや他のユーザーに影響しないか確認してください。'
+        : '';
+    if (!confirm(`「${entry.name}」を削除しますか？${suffix}${warning}`)) return;
     void (async () => {
       try {
-        await api(`/api/files/delete?path=${encodeURIComponent(joinPath(dir, entry.name))}`, {
-          method: 'DELETE',
-        });
+        await api(
+          `/api/files/delete?path=${encodeURIComponent(joinPath(dir, entry.name))}&scope=${scope}`,
+          { method: 'DELETE' },
+        );
         setError(null);
-        await load(dir);
+        await load(dir, scope);
       } catch (err) {
         setError(errorMessage(err));
       }
@@ -159,7 +227,7 @@ export default function Files() {
   function download(entry: FileEntry): void {
     const token = getToken();
     if (!token) return;
-    const url = `/api/files/download?path=${encodeURIComponent(joinPath(dir, entry.name))}&token=${encodeURIComponent(token)}`;
+    const url = `/api/files/download?path=${encodeURIComponent(joinPath(dir, entry.name))}&token=${encodeURIComponent(token)}&scope=${scope}`;
     window.open(url, '_blank');
   }
 
@@ -172,11 +240,14 @@ export default function Files() {
         for (let i = 0; i < files.length; i += 1) {
           const fd = new FormData();
           fd.append('file', files[i]);
-          await api(`/api/files/upload?path=${encodeURIComponent(dir)}`, { method: 'POST', body: fd });
+          await api(`/api/files/upload?path=${encodeURIComponent(dir)}&scope=${scope}`, {
+            method: 'POST',
+            body: fd,
+          });
           setUploading({ done: i + 1, total: files.length });
         }
         setError(null);
-        await load(dir);
+        await load(dir, scope);
       } catch (err) {
         setError(errorMessage(err));
       } finally {
@@ -186,7 +257,9 @@ export default function Files() {
     })();
   }
 
-  const crumbItems = crumbs(dir);
+  const crumbItems = crumbs(dir, scope);
+  const isAdmin = me?.role === 'admin';
+  const systemMode = scope === 'system';
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -197,6 +270,25 @@ export default function Files() {
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
               アップロード中 {uploading.done}/{uploading.total}
             </span>
+          )}
+          {isAdmin && (
+            <div className="flex items-center gap-0.5 rounded-md border border-zinc-200 bg-zinc-50 p-0.5">
+              <Button
+                size="sm"
+                variant={scope === 'workspace' ? 'secondary' : 'ghost'}
+                onClick={() => switchScope('workspace')}
+              >
+                マイワークスペース
+              </Button>
+              <Button
+                size="sm"
+                variant={scope === 'system' ? 'destructive' : 'ghost'}
+                onClick={() => switchScope('system')}
+              >
+                <ShieldAlert className="h-3.5 w-3.5" />
+                PC全体
+              </Button>
+            </div>
           )}
           <Button variant="secondary" disabled={uploading !== null} onClick={mkdir}>
             <FolderPlus className="h-3.5 w-3.5" />
@@ -210,7 +302,7 @@ export default function Files() {
             <Upload className="h-3.5 w-3.5" />
             アップロード
           </Button>
-          <Button variant="secondary" disabled={uploading !== null} onClick={() => void load(dir)}>
+          <Button variant="secondary" disabled={uploading !== null} onClick={() => void load(dir, scope)}>
             <RefreshCw className="h-3.5 w-3.5" />
             更新
           </Button>
@@ -225,6 +317,19 @@ export default function Files() {
         </PageHeader>
 
         {error && <ErrorBanner>{error}</ErrorBanner>}
+
+        {systemMode && (
+          <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-900">
+            <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
+            <div className="space-y-0.5">
+              <p className="font-medium">PC全体モード（管理者）</p>
+              <p className="text-amber-800">
+                全ドライブを読み書きできます。削除・上書きは慎重に行ってください。ドライブ直下、Windows、Program
+                Files、ユーザープロファイル直下、Kenji の機密ファイルは保護されています。
+              </p>
+            </div>
+          </div>
+        )}
 
         <div className="flex items-center gap-2 rounded-lg border border-zinc-200 bg-white px-3 py-2">
           <nav className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto">
@@ -250,7 +355,7 @@ export default function Files() {
             value={pathInput}
             onChange={(e) => setPathInput(e.target.value)}
             onKeyDown={onPathInputKeyDown}
-            placeholder="/src"
+            placeholder={systemMode ? 'C:\\Users' : '/src'}
             spellCheck={false}
           />
         </div>
@@ -269,14 +374,21 @@ export default function Files() {
               {entries.map((entry) => (
                 <TableRow key={entry.name}>
                   <TableCell className="max-w-0">
-                    {entry.kind === 'dir' ? (
+                    {entry.kind === 'dir' || entry.kind === 'drive' ? (
                       <button
                         type="button"
                         className="flex items-center gap-2 text-left text-zinc-700 hover:text-blue-600 hover:underline"
                         onClick={() => go(joinPath(dir, entry.name))}
                       >
-                        <Folder className="h-3.5 w-3.5 shrink-0 text-blue-500" />
-                        <span className="truncate">{entry.name}</span>
+                        {entry.kind === 'drive' ? (
+                          <HardDrive className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+                        ) : (
+                          <Folder className="h-3.5 w-3.5 shrink-0 text-blue-500" />
+                        )}
+                        <span className="truncate">
+                          {entry.name}
+                          {entry.kind === 'drive' ? '\\' : ''}
+                        </span>
                       </button>
                     ) : (
                       <span className="flex items-center gap-2 text-zinc-700">
@@ -286,7 +398,7 @@ export default function Files() {
                     )}
                   </TableCell>
                   <TableCell className="font-mono tabular-nums text-muted-foreground">
-                    {entry.kind === 'dir' ? '-' : formatBytes(entry.size)}
+                    {entry.kind === 'file' ? formatBytes(entry.size) : '-'}
                   </TableCell>
                   <TableCell className="whitespace-nowrap font-mono text-muted-foreground">
                     {formatDateTime(entry.modified)}
@@ -303,23 +415,27 @@ export default function Files() {
                           <Download className="h-3.5 w-3.5" />
                         </Button>
                       )}
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        title="名前変更"
-                        onClick={() => rename(entry)}
-                      >
-                        <Pencil className="h-3.5 w-3.5" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="hover:bg-red-50 hover:text-red-600"
-                        title="削除"
-                        onClick={() => remove(entry)}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </Button>
+                      {entry.kind !== 'drive' && (
+                        <>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            title="名前変更"
+                            onClick={() => rename(entry)}
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="hover:bg-red-50 hover:text-red-600"
+                            title="削除"
+                            onClick={() => remove(entry)}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        </>
+                      )}
                     </div>
                   </TableCell>
                 </TableRow>
@@ -327,7 +443,11 @@ export default function Files() {
             </TableBody>
           </Table>
           {loading && entries.length === 0 && <EmptyState>読み込み中...</EmptyState>}
-          {!loading && entries.length === 0 && <EmptyState>このフォルダは空です</EmptyState>}
+          {!loading && entries.length === 0 && (
+            <EmptyState>
+              {systemMode && dir === '/' ? '利用できるドライブが見つかりません' : 'このフォルダは空です'}
+            </EmptyState>
+          )}
         </Card>
       </div>
     </div>

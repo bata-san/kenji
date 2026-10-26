@@ -150,6 +150,36 @@ try {
   check('file_move', r.get('1')?.result?.isError !== true);
   r = await mcpBatch([toolCall(1, 'file_delete', { path: '/mcp-test/renamed.txt' })], token);
   check('file_delete', r.get('1')?.result?.isError !== true);
+  r = await mcpBatch([toolCall(1, 'file_delete', { path: '/mcp-test' })], token);
+  check('file_delete-dir', r.get('1')?.result?.isError !== true);
+
+  // 5b: run_command cwd (relative to the owner's workspace)
+  r = await mcpBatch([toolCall(1, 'file_mkdir', { path: '/mcp-cwd' })], token);
+  check('cwd-setup', r.get('1')?.result?.isError !== true);
+  r = await mcpBatch([toolCall(1, 'run_command', {
+    command: 'Get-Location', cwd: '/mcp-cwd', timeout_seconds: 60,
+  })], token);
+  check('run_command-cwd', toolText(r.get('1')).includes('mcp-cwd'));
+  r = await mcpBatch([toolCall(1, 'file_delete', { path: '/mcp-cwd' })], token);
+  check('cwd-cleanup', r.get('1')?.result?.isError !== true);
+
+  // 5c: system scope pass-through (admin token)
+  r = await mcpBatch([toolCall(1, 'files_list', { path: '/', scope: 'system' })], token);
+  const sysList = JSON.parse(toolText(r.get('1')));
+  check('files_list-system-drives', sysList.entries?.some((e) => e.kind === 'drive' && e.name === 'C:'));
+  const dataApi = `/${DATA.slice(0, 2).toUpperCase()}${DATA.slice(2).replace(/\\/g, '/')}`;
+  r = await mcpBatch([toolCall(1, 'file_write', {
+    path: `${dataApi}/mcp-system.txt`, content: 'mcp system scope', scope: 'system',
+  })], token);
+  check('file_write-system', r.get('1')?.result?.isError !== true);
+  r = await mcpBatch([toolCall(1, 'file_read', {
+    path: `${dataApi}/mcp-system.txt`, scope: 'system',
+  })], token);
+  check('file_read-system', toolText(r.get('1')).includes('mcp system scope'));
+  r = await mcpBatch([toolCall(1, 'file_delete', {
+    path: `${dataApi}/mcp-system.txt`, scope: 'system',
+  })], token);
+  check('file_delete-system', r.get('1')?.result?.isError !== true);
 
   // 6: audit_list
   r = await mcpBatch([toolCall(1, 'audit_list', { limit: 50 })], token);

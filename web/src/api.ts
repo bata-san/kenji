@@ -7,7 +7,8 @@ export const TOKEN_KEY = 'kenji_token';
 export type Role = 'viewer' | 'operator' | 'admin';
 export type JobStatus = 'running' | 'stopped' | 'failed' | 'stopping';
 export type RestartPolicy = 'never' | 'on_failure' | 'always';
-export type FileKind = 'file' | 'dir';
+export type FileKind = 'file' | 'dir' | 'drive';
+export type FileScope = 'workspace' | 'system';
 
 export interface ApiErrorBody {
   error: { code: string; message: string };
@@ -227,6 +228,7 @@ export interface FileEntry {
 
 export interface FileList {
   path: string;
+  scope?: FileScope;
   entries: FileEntry[];
 }
 

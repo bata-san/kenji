@@ -110,8 +110,16 @@ impl Api {
     }
 
     /// Download a file as (lossy) UTF-8 text.
-    fn download_text(&self, path: &str, max_bytes: usize) -> Result<String, ToolError> {
-        let url = format!("{}/api/files/download?path={}", self.base, Self::enc(path));
+    fn download_text(
+        &self,
+        path: &str,
+        max_bytes: usize,
+        scope: Option<&str>,
+    ) -> Result<String, ToolError> {
+        let mut url = format!("{}/api/files/download?path={}", self.base, Self::enc(path));
+        if let Some(scope) = scope {
+            url.push_str(&format!("&scope={}", Self::enc(scope)));
+        }
         let resp = ureq::get(&url)
             .set("Authorization", &format!("Bearer {}", self.token))
             .call()
@@ -133,9 +141,18 @@ impl Api {
     }
 
     /// Multipart upload (matches the /api/files/upload contract).
-    fn upload(&self, dir: &str, filename: &str, bytes: &[u8]) -> Result<Value, ToolError> {
+    fn upload(
+        &self,
+        dir: &str,
+        filename: &str,
+        bytes: &[u8],
+        scope: Option<&str>,
+    ) -> Result<Value, ToolError> {
         let boundary = format!("kenji-mcp-{}", uuid::Uuid::new_v4().simple());
-        let url = format!("{}/api/files/upload?path={}", self.base, Self::enc(dir));
+        let mut url = format!("{}/api/files/upload?path={}", self.base, Self::enc(dir));
+        if let Some(scope) = scope {
+            url.push_str(&format!("&scope={}", Self::enc(scope)));
+        }
         let mut body: Vec<u8> = Vec::new();
         let head = format!(
             "--{b}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{f}\"\r\nContent-Type: application/octet-stream\r\n\r\n",
@@ -213,7 +230,7 @@ fn tools() -> &'static [ToolDef] {
                         "name": {"type":"string","description":"Job name","default":"mcp-job"},
                         "command": {"type":"string","description":"Executable to run"},
                         "args": {"type":"array","items":{"type":"string"},"description":"Command arguments"},
-                        "cwd": {"type":"string","description":"Working directory inside the sandbox"},
+                        "cwd": {"type":"string","description":"Working directory. Relative paths use the owner's workspace; absolute paths are allowed."},
                         "env": {"type":"object","additionalProperties":{"type":"string"},"description":"Extra environment variables"},
                         "description": {"type":"string","description":"Human-readable description"},
                         "restart_policy": {"type":"string","enum":["never","on_failure","always"],"default":"never"},
@@ -275,6 +292,7 @@ fn tools() -> &'static [ToolDef] {
                         "command": {"type":"string","description":"PowerShell command (or executable path when shell=false)"},
                         "shell": {"type":"boolean","default":true,"description":"Run through PowerShell"},
                         "args": {"type":"array","items":{"type":"string"},"description":"Arguments when shell=false"},
+                        "cwd": {"type":"string","description":"Working directory. Relative paths use the owner's workspace; absolute paths (e.g. C:\\Users) are allowed."},
                         "timeout_seconds": {"type":"integer","minimum":1,"maximum":600,"default":120},
                         "max_output_bytes": {"type":"integer","minimum":256,"maximum":262144,"default":32768},
                         "keep_job": {"type":"boolean","default":false,"description":"Keep the job after completion for later inspection via job_logs"}
@@ -285,21 +303,25 @@ fn tools() -> &'static [ToolDef] {
             },
             ToolDef {
                 name: "files_list",
-                description: "List files and directories in the workspace sandbox.",
+                description: "List files and directories. Default scope is the per-user workspace; scope=system (admin only) browses the whole PC.",
                 schema: json!({
                     "type":"object",
-                    "properties":{"path":{"type":"string","description":"Directory path relative to the sandbox root","default":"/"}},
+                    "properties":{
+                        "path":{"type":"string","description":"Directory path. Workspace: '/dir'. System: '/' for drives, '/C:/Users'.","default":"/"},
+                        "scope":{"type":"string","enum":["workspace","system"],"default":"workspace","description":"workspace = own sandbox; system = whole PC (admin only)"}
+                    },
                     "additionalProperties":false
                 }),
                 handler: h_files_list,
             },
             ToolDef {
                 name: "file_read",
-                description: "Read a text file from the workspace sandbox (truncated to max_bytes).",
+                description: "Read a text file (truncated to max_bytes). Default scope is the per-user workspace; scope=system (admin only) reads anywhere on the PC.",
                 schema: json!({
                     "type":"object",
                     "properties": {
-                        "path": {"type":"string","description":"File path relative to the sandbox root"},
+                        "path": {"type":"string","description":"File path. Workspace: '/dir/file'. System: '/C:/Users/.../file'."},
+                        "scope": {"type":"string","enum":["workspace","system"],"default":"workspace","description":"workspace = own sandbox; system = whole PC (admin only)"},
                         "max_bytes": {"type":"integer","minimum":1,"maximum":1048576,"default":65536}
                     },
                     "required":["path"],"additionalProperties":false
@@ -308,11 +330,12 @@ fn tools() -> &'static [ToolDef] {
             },
             ToolDef {
                 name: "file_write",
-                description: "Create or overwrite a text file in the workspace sandbox.",
+                description: "Create or overwrite a text file. Default scope is the per-user workspace; scope=system (admin only) writes anywhere on the PC.",
                 schema: json!({
                     "type":"object",
                     "properties": {
-                        "path": {"type":"string","description":"File path relative to the sandbox root"},
+                        "path": {"type":"string","description":"File path. Workspace: '/dir/file'. System: '/C:/Users/.../file'."},
+                        "scope": {"type":"string","enum":["workspace","system"],"default":"workspace","description":"workspace = own sandbox; system = whole PC (admin only)"},
                         "content": {"type":"string","description":"File content (UTF-8)"}
                     },
                     "required":["path","content"],"additionalProperties":false
@@ -321,22 +344,26 @@ fn tools() -> &'static [ToolDef] {
             },
             ToolDef {
                 name: "file_mkdir",
-                description: "Create a directory (including intermediate parents) in the workspace sandbox.",
+                description: "Create a directory (including intermediate parents). Default scope is the per-user workspace; scope=system (admin only) creates anywhere on the PC.",
                 schema: json!({
                     "type":"object",
-                    "properties":{"path":{"type":"string","description":"Directory path relative to the sandbox root"}},
+                    "properties":{
+                        "path":{"type":"string","description":"Directory path. Workspace: '/dir'. System: '/C:/Users/...'."},
+                        "scope":{"type":"string","enum":["workspace","system"],"default":"workspace","description":"workspace = own sandbox; system = whole PC (admin only)"}
+                    },
                     "required":["path"],"additionalProperties":false
                 }),
                 handler: h_file_mkdir,
             },
             ToolDef {
                 name: "file_move",
-                description: "Move or rename a file or directory within the workspace sandbox.",
+                description: "Move or rename a file or directory. Default scope is the per-user workspace; scope=system (admin only) moves anywhere on the PC.",
                 schema: json!({
                     "type":"object",
                     "properties": {
-                        "from": {"type":"string","description":"Source path relative to the sandbox root"},
-                        "to": {"type":"string","description":"Destination path relative to the sandbox root"}
+                        "from": {"type":"string","description":"Source path. Workspace: '/a'. System: '/C:/Users/...'."},
+                        "to": {"type":"string","description":"Destination path. Workspace: '/b'. System: '/D:/Backup/...'."},
+                        "scope": {"type":"string","enum":["workspace","system"],"default":"workspace","description":"workspace = own sandbox; system = whole PC (admin only)"}
                     },
                     "required":["from","to"],"additionalProperties":false
                 }),
@@ -344,10 +371,13 @@ fn tools() -> &'static [ToolDef] {
             },
             ToolDef {
                 name: "file_delete",
-                description: "Delete a file in the workspace sandbox.",
+                description: "Delete a file or directory. Default scope is the per-user workspace; scope=system (admin only) deletes anywhere on the PC (critical roots are protected).",
                 schema: json!({
                     "type":"object",
-                    "properties":{"path":{"type":"string","description":"File path relative to the sandbox root"}},
+                    "properties":{
+                        "path":{"type":"string","description":"Path. Workspace: '/dir/file'. System: '/C:/Users/.../file'."},
+                        "scope":{"type":"string","enum":["workspace","system"],"default":"workspace","description":"workspace = own sandbox; system = whole PC (admin only)"}
+                    },
                     "required":["path"],"additionalProperties":false
                 }),
                 handler: h_file_delete,
@@ -372,6 +402,10 @@ fn need_str(params: &Value, key: &str) -> Result<String, ToolError> {
         .as_str()
         .map(String::from)
         .ok_or_else(|| ToolError::msg(format!("`{key}` (string) is required")))
+}
+
+fn scope_param(params: &Value) -> Option<&str> {
+    params["scope"].as_str().filter(|scope| !scope.is_empty())
 }
 
 // --- handlers ---
@@ -475,10 +509,17 @@ fn h_run_command(api: &Api, p: &Value) -> Result<ToolOutput, ToolError> {
         "mcp-run-{}",
         &uuid::Uuid::new_v4().simple().to_string()[..12]
     );
-    let job = api.post(
-        "/api/jobs",
-        json!({ "name": name, "command": cmd, "args": args, "description": "MCP run_command", "restart_policy": "never" }),
-    )?;
+    let mut body = json!({
+        "name": name,
+        "command": cmd,
+        "args": args,
+        "description": "MCP run_command",
+        "restart_policy": "never"
+    });
+    if let Some(cwd) = p["cwd"].as_str().filter(|cwd| !cwd.is_empty()) {
+        body["cwd"] = json!(cwd);
+    }
+    let job = api.post("/api/jobs", body)?;
     let id = job["id"]
         .as_str()
         .ok_or_else(|| ToolError::msg("no job id in response"))?
@@ -533,10 +574,11 @@ fn h_run_command(api: &Api, p: &Value) -> Result<ToolOutput, ToolError> {
 
 fn h_files_list(api: &Api, p: &Value) -> Result<ToolOutput, ToolError> {
     let path = p["path"].as_str().unwrap_or("/");
-    Ok(ToolOutput::Json(api.get(
-        "/api/files/list",
-        &format!("path={}", Api::enc(path)),
-    )?))
+    let mut query = format!("path={}", Api::enc(path));
+    if let Some(scope) = scope_param(p) {
+        query.push_str(&format!("&scope={}", Api::enc(scope)));
+    }
+    Ok(ToolOutput::Json(api.get("/api/files/list", &query)?))
 }
 
 fn h_file_read(api: &Api, p: &Value) -> Result<ToolOutput, ToolError> {
@@ -545,19 +587,24 @@ fn h_file_read(api: &Api, p: &Value) -> Result<ToolOutput, ToolError> {
         .as_u64()
         .unwrap_or(64 * 1024)
         .min(1024 * 1024) as usize;
-    Ok(ToolOutput::Text(api.download_text(&path, max)?))
+    Ok(ToolOutput::Text(api.download_text(
+        &path,
+        max,
+        scope_param(p),
+    )?))
 }
 
 fn h_file_write(api: &Api, p: &Value) -> Result<ToolOutput, ToolError> {
     let path = need_str(p, "path")?;
     let content = need_str(p, "content")?;
     let (dir, name) = split_path(&path)?;
-    let res = api.upload(&dir, &name, content.as_bytes())?;
+    let res = api.upload(&dir, &name, content.as_bytes(), scope_param(p))?;
     Ok(ToolOutput::Json(res))
 }
 
 fn split_path(path: &str) -> Result<(String, String), ToolError> {
-    let p = path.trim().trim_start_matches('/');
+    let normalized = path.trim().replace('\\', "/");
+    let p = normalized.trim_start_matches('/');
     if p.is_empty() {
         return Err(ToolError::msg("`path` must name a file"));
     }
@@ -565,35 +612,50 @@ fn split_path(path: &str) -> Result<(String, String), ToolError> {
         return Err(ToolError::msg("`path` must not contain `..`"));
     }
     let (dir, name) = match p.rfind('/') {
-        Some(i) => (format!("/{}", &p[..i]), &p[i + 1..]),
+        Some(i) => {
+            let parent = &p[..i];
+            let dir = if parent.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{parent}")
+            };
+            (dir, &p[i + 1..])
+        }
         None => ("/".to_string(), p),
     };
+    if name.is_empty() {
+        return Err(ToolError::msg("`path` must name a file"));
+    }
     files::safe_file_name(name).map_err(|e| ToolError::msg(format!("invalid path: {e}")))?;
     Ok((dir, name.to_string()))
 }
 
 fn h_file_mkdir(api: &Api, p: &Value) -> Result<ToolOutput, ToolError> {
     let path = need_str(p, "path")?;
-    Ok(ToolOutput::Json(
-        api.post("/api/files/mkdir", json!({ "path": path }))?,
-    ))
+    let mut body = json!({ "path": path });
+    if let Some(scope) = scope_param(p) {
+        body["scope"] = json!(scope);
+    }
+    Ok(ToolOutput::Json(api.post("/api/files/mkdir", body)?))
 }
 
 fn h_file_move(api: &Api, p: &Value) -> Result<ToolOutput, ToolError> {
     let from = need_str(p, "from")?;
     let to = need_str(p, "to")?;
-    Ok(ToolOutput::Json(api.post(
-        "/api/files/move",
-        json!({ "from": from, "to": to }),
-    )?))
+    let mut body = json!({ "from": from, "to": to });
+    if let Some(scope) = scope_param(p) {
+        body["scope"] = json!(scope);
+    }
+    Ok(ToolOutput::Json(api.post("/api/files/move", body)?))
 }
 
 fn h_file_delete(api: &Api, p: &Value) -> Result<ToolOutput, ToolError> {
     let path = need_str(p, "path")?;
-    Ok(ToolOutput::Json(api.delete(
-        "/api/files/delete",
-        &format!("path={}", Api::enc(&path)),
-    )?))
+    let mut query = format!("path={}", Api::enc(&path));
+    if let Some(scope) = scope_param(p) {
+        query.push_str(&format!("&scope={}", Api::enc(scope)));
+    }
+    Ok(ToolOutput::Json(api.delete("/api/files/delete", &query)?))
 }
 
 fn h_audit_list(api: &Api, p: &Value) -> Result<ToolOutput, ToolError> {
@@ -764,6 +826,15 @@ mod tests {
             split_path("/b.txt").unwrap(),
             ("/".to_string(), "b.txt".to_string())
         );
+        assert_eq!(
+            split_path(r"C:\Users\a.txt").unwrap(),
+            ("/C:/Users".to_string(), "a.txt".to_string())
+        );
+        assert_eq!(
+            split_path("/C:/a.txt").unwrap(),
+            ("/C:".to_string(), "a.txt".to_string())
+        );
         assert!(split_path("/a/../c.txt").is_err());
+        assert!(split_path(r"C:\Users\..\secret.txt").is_err());
     }
 }

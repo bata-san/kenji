@@ -65,7 +65,7 @@ Job オブジェクト:
 {
   "id":"0a1b...","name":"train","description":"...",
   "command":"python","args":["train.py","--epochs","10"],
-  "cwd":"C:\\work\\proj",           // 省略可。相対パスはワークスペースルート基準
+  "cwd":"C:\\work\\proj",           // 省略可。相対パスは作成者の専用フォルダ基準、絶対パスはそのまま
   "env":{"CUDA_VISIBLE_DEVICES":"0"}, // 省略可
   "restart_policy":"never",        // "never" | "on_failure" | "always"
   "schedule":"*/5 * * * *",        // 省略可。標準5フィールドcron(分 時 日 月 曜)
@@ -116,26 +116,39 @@ Job オブジェクト:
 
 ---
 
-## Files（各ユーザーの専用フォルダ配下のみ。`..` は拒否）
+## Files
 
-パス表現: 自分の専用フォルダ（`workspace/<ユーザー名>`）のルートが `/`。APIキーは `workspace/_shared` を共有。例 `/src/main.rs`、`/docs`。クエリ/JSONとも文字列。
+### スコープ
 
-### GET /api/files/list?path=/  (viewer+)
-→ `{"path":"/","entries":[{"name":"main.rs","kind":"file","size":123,"modified":"2026-10-25T09:00:00Z"},{"name":"docs","kind":"dir","size":null,"modified":"..."}]}`
+| scope | 対象 | 必要ロール |
+|---|---|---|
+| `workspace`（省略時） | 自分の専用フォルダ（`workspace/<ユーザー名>`）。APIキーは `workspace/_shared` を共有 | viewer+（書き込みは operator+） |
+| `system` | PC全体（ローカルドライブ）。管理者専用 | admin |
 
-### POST /api/files/mkdir  (operator+)  `{"path":"/newdir"}`
+- `workspace` のパス表現: 専用フォルダのルートが `/`。例 `/src/main.rs`、`/docs`。`..` やドライブパスは拒否。
+- `system` のパス表現: `/` はドライブ一覧、`/C:` は `C:\`、`/C:/Users/foo` は `C:\Users\foo`。`C:\Users\foo` / `C:/Users/foo` も受け付ける。UNC・デバイスパス・`..` は拒否。
+- `scope` はクエリ（GET/DELETE/upload）またはJSONボディ（mkdir/move）で指定する。
+- `system` の破壊操作ガード: ドライブ直下、`Windows`、`Program Files`、`Program Files (x86)`、`ProgramData`、`Users`、各ユーザープロファイル直下、`$Recycle.Bin`、`System Volume Information`、`Recovery`、`Boot`、`EFI`、`ProgramData\kenji` は削除・移動不可。Kenji の `auth.json` / `users.db*` / `config.json` / `jobs.json` は削除・移動・上書き不可。
+- 監査ログの `detail` は `[workspace] /path` または `[system] /C:/path` の形式。
+
+### GET /api/files/list?path=/&scope=workspace  (viewer+)
+→ `{"path":"/","scope":"workspace","entries":[{"name":"main.rs","kind":"file","size":123,"modified":"2026-10-25T09:00:00Z"},{"name":"docs","kind":"dir","size":null,"modified":"..."}]}`
+
+`scope=system` で `path=/` を指定した場合、`kind:"drive"` のドライブ一覧を返す。
+
+### POST /api/files/mkdir  (operator+)  `{"path":"/newdir","scope":"workspace"}`
 → 200 `{"ok":true}`
 
-### POST /api/files/move  (operator+)  `{"from":"/a.txt","to":"/b/a.txt"}`
+### POST /api/files/move  (operator+)  `{"from":"/a.txt","to":"/b/a.txt","scope":"workspace"}`
 → 200 `{"ok":true}`
 
-### DELETE /api/files/delete?path=/dir  (operator+)  — ディレクトリは再帰削除
+### DELETE /api/files/delete?path=/dir&scope=workspace  (operator+)  — ディレクトリは再帰削除
 → 200 `{"ok":true}`
 
-### GET /api/files/download?path=/a.bin  (viewer+)  — 認証はクエリ `token` でも可
+### GET /api/files/download?path=/a.bin&scope=workspace  (viewer+)  — 認証はクエリ `token` でも可
 → バイナリ本文、`Content-Disposition: attachment`
 
-### POST /api/files/upload?path=/dir  (operator+)  — multipart/form-data、フィールド名 `file`（複数ファイル可、上限2GiB）
+### POST /api/files/upload?path=/dir&scope=workspace  (operator+)  — multipart/form-data、フィールド名 `file`（複数ファイル可、1ファイル256MiB・リクエスト合計512MiBまで）
 → 200 `{"ok":true,"saved":[{"name":"a.bin","size":123}]}`
 
 ---
@@ -216,9 +229,9 @@ kenji mcp --url http://127.0.0.1:8787 --token <APIキーまたはJWT>
 | `job_run` | ジョブ作成（サーバー仕様により作成と同時に起動。停止は `job_stop`。cron/再起動ポリシー指定可） |
 | `job_start` / `job_stop` / `job_delete` | ジョブの起動・停止・削除 |
 | `job_logs` | ジョブログの末尾取得（max_bytes上限1MiB） |
-| `run_command` | one-shotコマンド実行（デフォルトでPowerShell経由、最大600秒待機、一時ジョブは自動削除） |
-| `files_list` / `file_read` / `file_write` | サンドボックス内のファイル閲覧・書き込み |
-| `file_mkdir` / `file_move` / `file_delete` | サンドボックス内のディレクトリ作成・移動・削除 |
+| `run_command` | one-shotコマンド実行（デフォルトでPowerShell経由、最大600秒待機、一時ジョブは自動削除）。`cwd` で作業ディレクトリを指定可（相対パスは自分のワークスペース基準、絶対パス可） |
+| `files_list` / `file_read` / `file_write` | ファイル閲覧・書き込み。`scope:"workspace"`（既定）または `scope:"system"`（adminのみPC全体） |
+| `file_mkdir` / `file_move` / `file_delete` | ディレクトリ作成・移動・削除。同じく `scope` 指定可 |
 | `audit_list` | 監査ログ参照（上限2000件） |
 
 ツールの引数スキーマは `tools/list` が返す `inputSchema` を参照してください。
