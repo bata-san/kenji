@@ -44,7 +44,7 @@ Windows PC を、インターネット経由で自由に使える小規模プラ
 │  HTTP/WS API (axum)  ── 認証(RBAC) ── 監査ログ                       │
 │   ├─ /api/auth/*      ログイン(JWT)・APIキー管理                      │
 │   ├─ /api/jobs/*      ジョブ実行・管理・ライブログ(WS)                 │
-│   ├─ /api/terminal    ConPTY ↔ WebSocket (PowerShell)                │
+│   ├─ /api/terminal    永続ConPTYセッション ↔ WebSocket (PowerShell)   │
 │   ├─ /api/files/*     ワークスペース内ファイル操作                    │
 │   ├─ /api/system/*    CPU/GPU/メモリ/ディスク監視                     │
 │   ├─ /api/settings, /api/audit, /api/update/*, /api/health             │

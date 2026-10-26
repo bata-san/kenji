@@ -3,6 +3,7 @@ pub mod auth_routes;
 pub mod files_routes;
 pub mod jobs_routes;
 pub mod system_routes;
+pub mod terminal_routes;
 pub mod update_routes;
 pub mod user_routes;
 pub mod ws_routes;
@@ -157,6 +158,14 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/api/jobs/{id}/logs", get(jobs_routes::get_logs))
         .route("/api/jobs/{id}/logs/ws", get(jobs_routes::logs_ws))
         .route("/api/terminal/ws", get(ws_routes::terminal_ws))
+        .route(
+            "/api/terminal/sessions",
+            get(terminal_routes::list).post(terminal_routes::create),
+        )
+        .route(
+            "/api/terminal/sessions/{id}",
+            delete(terminal_routes::remove),
+        )
         .route("/api/files/list", get(files_routes::list))
         .route("/api/files/mkdir", post(files_routes::mkdir))
         .route("/api/files/move", post(files_routes::r#move))

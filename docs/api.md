@@ -110,9 +110,32 @@ Job オブジェクト:
 
 ## Terminal
 
-### WS /api/terminal/ws?token=...  (operator+)  — PowerShell (ConPTY)
-- **バイナリフレーム**: クライアント→サーバーはキー入力（UTF-8バイト列）。サーバー→クライアントはPTY出力（UTF-8バイト列）。
-- **テキストフレーム（JSON）**: 制御用。クライアント→`{"type":"resize","cols":80,"rows":24}`。サーバー→`{"type":"exit"}`（PTY終了時、その後ソケットを閉じる）。
+ターミナルは **サーバー側の永続セッション** です。WebSocket はそのビューにすぎず、画面移動・ブラウザ再読み込み・一時的な通信断・ブラウザ終了では PTY を終了しません。終了するのはタブを閉じたとき（`DELETE`）またはシェル自体が終了したときだけです。ただし、サーバープロセスの再起動・OS再起動・サービス再起動では PTY も終了します（ConPTY はプロセスに属するため）。
+
+### GET /api/terminal/sessions  (operator+)  — 自分のタブ一覧
+→ `{"sessions":[{"id":"...","title":"ターミナル 1","created_at":"...","cwd":"C:\\...","attached":true,"exited":false}]}`
+
+### POST /api/terminal/sessions  (operator+)  — 新しいタブ
+```json
+{"title":"ビルド","cols":120,"rows":30}
+```
+`title` / `cols` / `rows` は省略可能。→ `TerminalInfo`（GET の配列要素と同じ形式）。
+上限は同時16セッション・1ユーザー6セッション。超過時は `409 conflict`。
+
+### DELETE /api/terminal/sessions/{id}  (operator+)  — タブを閉じる（シェルを終了）
+→ `{"ok":true}`。存在しない・他ユーザーのセッションは `404`。
+
+### WS /api/terminal/ws?token=...&session={id}&since={offset}  (operator+)
+- `session` を省略すると従来互換の一時セッションを作成し、ソケット切断時に終了します（通常のWeb UIは必ず `session` を指定）。
+- **接続直後（テキスト/JSON）**: `{"type":"ready","session":{...},"offset":123,"reset":false,"exited":false}`
+  - `offset`: 直後に送られるバイナリ列の開始バイト位置。
+  - `reset:true`: クライアントはターミナルをクリアしてから受信すること。`since` から継続できない場合（リングバッファ超過、不明なオフセット、`since` 省略）に付く。`since=0` でバッファ先頭が0のときは `false` で、そのまま全スクロールバックを追記できる。
+  - `since` に最後に受信したバイト位置を渡すと、その続きから差分再送します（最大2MiBのスクロールバック）。
+- **バイナリフレーム**: クライアント→サーバーはキー入力（UTF-8バイト列）。サーバー→クライアントはPTY出力（UTF-8バイト列、`offset` から連続）。
+- **テキストフレーム（JSON）**: 制御用。
+  - クライアント→ `{"type":"resize","cols":80,"rows":24}` / `{"type":"ping"}`
+  - サーバー→ `{"type":"pong"}` / `{"type":"exit"}`（PTY終了） / `{"type":"reconnect"}`（購読が追いつかず再差分取得が必要）
+- **Keepalive**: サーバーは20秒ごとにWebSocket Pingを送信し、アイドル状態のトンネル/プロキシによる切断を防ぎます。クライアントも25秒ごとにJSON pingを送信します。
 
 ---
 
@@ -173,7 +196,7 @@ tunnel.status: `disabled` | `starting` | `running` | `stopped` | `unavailable` |
 
 ### GET /api/audit?limit=200  (admin)
 → `{"entries":[{"ts":"...","user":"admin","role":"admin","action":"job_start","detail":"train"}]}`
-（新しい順。action: login / login_failed / job_create / job_start / job_stop / job_delete / file_mkdir / file_move / file_delete / file_upload / file_download / key_create / key_delete / settings_update / update_check / update_install / terminal_open）
+（新しい順。action: login / login_failed / job_create / job_start / job_stop / job_delete / file_mkdir / file_move / file_delete / file_upload / file_download / key_create / key_delete / settings_update / update_check / update_install / terminal_open / terminal_close）
 
 ---
 

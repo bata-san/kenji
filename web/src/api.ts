@@ -217,6 +217,24 @@ export interface AuditEntry {
   detail: string | null;
 }
 
+// ---------- Terminal ----------
+
+/** Persistent server-side terminal tab. */
+export interface TerminalSessionInfo {
+  id: string;
+  title: string;
+  created_at: string;
+  cwd: string;
+  attached: boolean;
+  exited: boolean;
+}
+
+export interface CreateTerminalRequest {
+  title?: string;
+  cols?: number;
+  rows?: number;
+}
+
 // ---------- Files ----------
 
 export interface FileEntry {
@@ -318,7 +336,8 @@ export async function api<T = unknown>(path: string, init?: RequestInit): Promis
 export function wsUrl(path: string): string {
   const token = getToken() ?? '';
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${proto}//${window.location.host}${path}?token=${encodeURIComponent(token)}`;
+  const separator = path.includes('?') ? '&' : '?';
+  return `${proto}//${window.location.host}${path}${separator}token=${encodeURIComponent(token)}`;
 }
 
 // ---------- フォーマット ----------

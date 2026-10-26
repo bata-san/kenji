@@ -87,3 +87,12 @@ impl From<tokio::task::JoinError> for ApiError {
         ApiError::Internal(anyhow::Error::new(e))
     }
 }
+
+impl From<crate::pty::TerminalError> for ApiError {
+    fn from(e: crate::pty::TerminalError) -> Self {
+        match e {
+            crate::pty::TerminalError::Limit(message) => ApiError::Conflict(message),
+            crate::pty::TerminalError::Open(error) => ApiError::Internal(error),
+        }
+    }
+}

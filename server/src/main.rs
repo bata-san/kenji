@@ -505,6 +505,17 @@ pub async fn run_server(
         });
     }
 
+    // Reap shells that exited on their own so their tab slots are released.
+    {
+        let terminals = state.terminals.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                terminals.prune_exited();
+            }
+        });
+    }
+
     // 定期アップデート確認（auto_check 有効時）。auto_install が有効なら検証・適用まで行う。
     {
         let st = state.clone();
@@ -599,6 +610,7 @@ pub async fn run_server(
     };
     // Graceful cleanup: managed children and the tunnel die with the server.
     state.jobs.stop_all();
+    state.terminals.shutdown_all();
     state.tunnel.stop();
     // Give spawned taskkill commands a moment to complete before exit.
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
