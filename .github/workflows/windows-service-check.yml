@@ -1,0 +1,45 @@
+name: Windows service integration checks
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/install-windows-services.ps1'
+      - 'server/**'
+      - 'web/**'
+      - '.github/workflows/windows-service-check.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Parse Windows service installer
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path scripts/install-windows-services.ps1).Path,
+            [ref]$tokens,
+            [ref]$errors
+          )
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            exit 1
+          }
+      - name: Build web UI
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+      - name: Run Rust tests
+        working-directory: server
+        run: cargo test
