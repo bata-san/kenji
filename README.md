@@ -61,11 +61,11 @@ ngrokを本番で使う場合、既存のngrok設定ファイルを維持した�
 
 ```powershell
 # 管理者権限の PowerShell。リポジトリのルートから実行
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows-services.ps1 -NgrokConfig "C:\ProgramData\kenji\ngrok.yml" -KenjiExe ".\target\release\kenji.exe"
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows-services.ps1 -NgrokConfig "C:\ProgramData\kenji\ngrok.yml" -KenjiExe ".\target\release\kenji.exe" -AllowLocalSystem
 Get-Service kenji,ngrok
 ```
 
-Kenjiの初期設定、両サービスの自動起動、異常終了時のSCM再起動設定を行います。ngrokの認証トークンはKenjiへコピーしません。既存サービスは再登録・上書きせず、状態確認に利用します。詳しい条件・セキュリティ上の注意は [Windows Service 導入ガイド](docs/WINDOWS_SERVICE.md) に記載しています。
+Kenjiの初期設定、両サービスの自動起動、異常終了時のSCM再起動設定を行います。`-AllowLocalSystem` は既定のSYSTEM権限で新規登録することへの明示的な同意です（本番では専用アカウント推奨）。ngrokの認証トークンはKenjiへコピーしません。既存サービスは再登録・上書きせず、状態確認に利用します。詳しい条件・セキュリティ上の注意は [Windows Service 導入ガイド](docs/WINDOWS_SERVICE.md) に記載しています。
 
 ## 外部アクセス（Cloudflare Tunnel）
 
