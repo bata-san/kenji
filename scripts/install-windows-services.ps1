@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 # Install Kenji and ngrok as separate automatic Windows services.
 # Run from an elevated PowerShell session. An existing ngrok configuration is
 # required; this script deliberately never accepts or stores an auth token.
