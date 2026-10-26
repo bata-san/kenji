@@ -183,9 +183,12 @@ Job オブジェクト:
 {"data_dir":"C:\\ProgramData\\kenji","workspace_root":"C:\\ProgramData\\kenji\\workspace",
  "bind":"127.0.0.1","port":8787,"version":"0.1.0",
  "tunnel":{"available":true,"enabled":false,"url":null,"status":"disabled"},
+ "ngrok":{"installed":true,"running":true,"status":"running"},
  "update":{"auto_check":true,"auto_install":false,"check_interval_hours":24,"repo":"bata-san/kenji"}}
 ```
 tunnel.status: `disabled` | `starting` | `running` | `stopped` | `unavailable` | `error`
+
+`ngrok` はWindows SCMの独立したngrokサービスの状態です。`status` は `running` / `stopped` / `starting` / `stopping` / `pending` / `not_installed` / `unavailable` / `unsupported`。管理画面はngrokの設定ファイル・認証トークンを読み取りません。稼働中表示は公開URLへの到達性を保証しません。
 
 ### PUT /api/settings  (admin)  — 部分更新
 ```json
@@ -272,7 +275,7 @@ kenji mcp --url http://127.0.0.1:8787 --token <APIキーまたはJWT>
 }
 ```
 
-AIエージェントには**operatorロールのAPIキー**を渡すのが典型です（viewerは読み取り専用・adminは過剰）。リモートマシンで稼働するKenjiに接続する場合は、`--url` をCloudflare TunnelのURLにしてください。
+AIエージェントには**operatorロールのAPIキー**を渡すのが典型です（viewerは読み取り専用・adminは過剰）。リモートマシンで稼働するKenjiに接続する場合は、`--url` をngrok または Cloudflare Tunnel のURLにしてください。
 
 ---
 
