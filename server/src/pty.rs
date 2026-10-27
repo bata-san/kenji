@@ -96,6 +96,7 @@ impl TerminalManager {
         shell: &str,
         args: &[String],
         cwd: &Path,
+        profile: &crate::profiles::CliProfile,
         cols: u16,
         rows: u16,
         title: Option<String>,
@@ -111,9 +112,10 @@ impl TerminalManager {
             .map(|s| s.chars().take(64).collect::<String>())
             .unwrap_or_else(|| format!("ターミナル {number}"));
 
-        let session =
-            TerminalSession::spawn(id, user, title, number, cwd, shell, args, cols, rows, guard)
-                .map_err(TerminalError::Open)?;
+        let session = TerminalSession::spawn(
+            id, user, title, number, cwd, profile, shell, args, cols, rows, guard,
+        )
+        .map_err(TerminalError::Open)?;
 
         let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         state.sessions.insert(id, session.clone());
@@ -280,6 +282,7 @@ impl TerminalSession {
         title: String,
         number: usize,
         cwd: &Path,
+        profile: &crate::profiles::CliProfile,
         shell: &str,
         args: &[String],
         cols: u16,
@@ -298,6 +301,7 @@ impl TerminalSession {
         let mut cmd = CommandBuilder::new(shell);
         cmd.args(args);
         cmd.cwd(cwd);
+        profile.configure_command(&mut cmd);
         let child = pair
             .slave
             .spawn_command(cmd)

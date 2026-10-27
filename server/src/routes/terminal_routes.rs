@@ -34,10 +34,15 @@ pub async fn create(
     Json(request): Json<CreateTerminalRequest>,
 ) -> ApiResult<Json<TerminalInfo>> {
     ctx.require(Role::Operator)?;
-    let (shell, args, workspace_root) = terminal_settings(&state);
+    let (shell, args, workspace_root, data_dir) = terminal_settings(&state);
     let workspace = files::ensure_user_root(&workspace_root, &ctx.username).map_err(|e| {
         ApiError::Internal(anyhow::anyhow!(
             "ユーザー作業フォルダを準備できません: {e:#}"
+        ))
+    })?;
+    let profile = crate::profiles::CliProfile::ensure(&data_dir, &ctx.username).map_err(|e| {
+        ApiError::Internal(anyhow::anyhow!(
+            "ユーザーCLIプロファイルを準備できません: {e:#}"
         ))
     })?;
 
@@ -52,7 +57,16 @@ pub async fn create(
 
     let session = state
         .terminals
-        .create(&ctx.username, &shell, &args, &workspace, cols, rows, title)
+        .create(
+            &ctx.username,
+            &shell,
+            &args,
+            &workspace,
+            &profile,
+            cols,
+            rows,
+            title,
+        )
         .map_err(ApiError::from)?;
 
     state.audit.log(

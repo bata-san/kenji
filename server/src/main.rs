@@ -6,6 +6,7 @@ mod files;
 mod jobs;
 mod mcp;
 mod metrics;
+mod profiles;
 mod pty;
 mod repair;
 mod resources;

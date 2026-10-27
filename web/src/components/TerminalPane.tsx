@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
-import { RefreshCw, X } from 'lucide-react';
+import { Clipboard, ClipboardPaste, RefreshCw, X } from 'lucide-react';
 import { api, wsUrl } from '@/api';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -47,7 +47,30 @@ export default function TerminalPane({
   const sendResizeRef = useRef<() => void>(() => {});
   const activeRef = useRef(active);
   const callbacksRef = useRef({ onStateChange, onRestart, onClose });
+  const terminalRef = useRef<XTerm | null>(null);
   const [exited, setExited] = useState(false);
+  const [clipboardError, setClipboardError] = useState('');
+
+  const copySelection = async (): Promise<void> => {
+    const selection = terminalRef.current?.getSelection() ?? '';
+    if (!selection) return;
+    try {
+      await navigator.clipboard.writeText(selection);
+      setClipboardError('');
+    } catch {
+      setClipboardError('クリップボードへのアクセスが拒否されました');
+    }
+  };
+
+  const pasteClipboard = async (): Promise<void> => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) terminalRef.current?.paste(text);
+      setClipboardError('');
+    } catch {
+      setClipboardError('貼り付けにはブラウザのクリップボード許可が必要です');
+    }
+  };
 
   useEffect(() => {
     callbacksRef.current = { onStateChange, onRestart, onClose };
@@ -80,16 +103,38 @@ export default function TerminalPane({
     let lastServerMessage = Date.now();
 
     const term = new XTerm({
-      fontFamily: 'Consolas, "Courier New", monospace',
-      fontSize: 13,
+      fontFamily: '"Cascadia Code", Consolas, "Courier New", monospace',
+      fontSize: 14,
+      lineHeight: 1.2,
       cursorBlink: true,
       scrollback: 5000,
       theme: {
-        background: '#09090b',
-        foreground: '#e4e4e7',
-        cursor: '#3b82f6',
-        selectionBackground: '#3f3f46',
+        background: '#090e18',
+        foreground: '#dbe5f2',
+        cursor: '#7dd3fc',
+        selectionBackground: '#2563eb88',
+        black: '#0b1220', red: '#fb7185', green: '#86efac', yellow: '#fde68a',
+        blue: '#93c5fd', magenta: '#d8b4fe', cyan: '#67e8f9', white: '#e2e8f0',
+        brightBlack: '#64748b', brightRed: '#fda4af', brightGreen: '#bbf7d0',
+        brightYellow: '#fef08a', brightBlue: '#bfdbfe', brightMagenta: '#e9d5ff',
+        brightCyan: '#a5f3fc', brightWhite: '#f8fafc',
       },
+    });
+    terminalRef.current = term;
+    term.attachCustomKeyEventHandler((event) => {
+      if (event.type === 'keydown' && event.shiftKey && event.ctrlKey) {
+        if (event.key.toLowerCase() === 'c') {
+          event.preventDefault();
+          void copySelection();
+          return false;
+        }
+        if (event.key.toLowerCase() === 'v') {
+          event.preventDefault();
+          void pasteClipboard();
+          return false;
+        }
+      }
+      return true;
     });
     const fitAddon = new FitAddon();
     fitRef.current = fitAddon;
@@ -315,6 +360,7 @@ export default function TerminalPane({
       detachSocket();
       sendResizeRef.current = () => {};
       fitRef.current = null;
+      terminalRef.current = null;
       term.dispose();
     };
   }, [sessionId]);
@@ -323,8 +369,17 @@ export default function TerminalPane({
     <div className={cn('absolute inset-0', active ? 'block' : 'hidden')}>
       <div
         ref={containerRef}
-        className="h-full w-full rounded-lg border border-zinc-200 bg-[#09090b] p-2"
+        className="h-full w-full rounded-lg border border-slate-700 bg-[#090e18] p-3 pt-11 shadow-inner shadow-black/30"
       />
+      <div className="absolute right-3 top-3 z-10 flex items-center gap-1 rounded-md border border-slate-700 bg-slate-900/95 p-1 shadow-lg">
+        <Button size="sm" variant="ghost" className="h-7 gap-1.5 px-2 text-xs text-slate-200 hover:bg-slate-700" onClick={() => void copySelection()} title="選択範囲をコピー (Ctrl+Shift+C)">
+          <Clipboard className="h-3.5 w-3.5" /> コピー
+        </Button>
+        <Button size="sm" variant="ghost" className="h-7 gap-1.5 px-2 text-xs text-slate-200 hover:bg-slate-700" onClick={() => void pasteClipboard()} title="クリップボードから貼り付け (Ctrl+Shift+V)">
+          <ClipboardPaste className="h-3.5 w-3.5" /> 貼り付け
+        </Button>
+      </div>
+      {clipboardError && <div className="absolute bottom-3 right-3 z-10 rounded bg-amber-950/95 px-2 py-1 text-xs text-amber-200">{clipboardError}</div>}
       {exited && (
         <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 rounded-lg bg-zinc-950/85 backdrop-blur-sm">
           <p className="text-sm font-medium text-zinc-100">セッション終了</p>

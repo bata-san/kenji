@@ -56,13 +56,25 @@ pub async fn terminal_ws(
             .get(&ctx.username, id)
             .ok_or(ApiError::NotFound)?,
         None => {
-            let (shell, args, workspace_root) = terminal_settings(&state);
+            let (shell, args, workspace_root, data_dir) = terminal_settings(&state);
             let workspace = files::ensure_user_root(&workspace_root, &ctx.username)
                 .context("ユーザー作業フォルダを準備できません")
                 .map_err(ApiError::from)?;
+            let profile = crate::profiles::CliProfile::ensure(&data_dir, &ctx.username)
+                .context("ユーザーCLIプロファイルを準備できません")
+                .map_err(ApiError::from)?;
             state
                 .terminals
-                .create(&ctx.username, &shell, &args, &workspace, cols, rows, None)
+                .create(
+                    &ctx.username,
+                    &shell,
+                    &args,
+                    &workspace,
+                    &profile,
+                    cols,
+                    rows,
+                    None,
+                )
                 .map_err(ApiError::from)?
         }
     };
@@ -91,12 +103,15 @@ pub async fn terminal_ws(
     }))
 }
 
-pub(crate) fn terminal_settings(state: &SharedState) -> (String, Vec<String>, std::path::PathBuf) {
+pub(crate) fn terminal_settings(
+    state: &SharedState,
+) -> (String, Vec<String>, std::path::PathBuf, std::path::PathBuf) {
     let cfg = state.config.read().unwrap_or_else(|e| e.into_inner());
     (
         cfg.terminal.shell.clone(),
         cfg.terminal.args.clone(),
         cfg.workspace_root.clone(),
+        cfg.data_dir.clone(),
     )
 }
 

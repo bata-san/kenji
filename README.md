@@ -3,7 +3,7 @@
 1台のWindows PCに導入するだけで、場所や用途を問わず計算資源を安全かつ自由に活用できる、小規模プライベートクラウドを構成するソフトウェアです。
 
 - **汎用実行**: 任意のコマンド・スクリプト・常駐サービスを「ジョブ」として統一管理（開始/停止/再実行/再起動ポリシー/cronスケジュール/ログ収集）
-- **リモートターミナル**: PowerShell（ConPTY）をブラウザから操作。タブ作成・自動再接続対応で、画面移動・再読み込み・ブラウザを閉じてもサーバー側でセッションを継続
+- **リモートターミナル**: PowerShell（ConPTY）をブラウザから操作。タブ作成・自動再接続・見やすい配色・コピー＆ペースト対応で、画面移動・再読み込み後もセッションを継続
 - **ファイル管理**: ユーザーごとの専用フォルダ内でアップロード/ダウンロード/リネーム/削除。管理者は「PC全体」モードで全ドライブを操作可能（重要領域は保護）
 - **リソース監視**: CPU / メモリ / ディスク / GPU（NVIDIA）
 - **遠隔アクセス**: Cloudflare Tunnel でポート開放・固定IP不要
@@ -64,6 +64,20 @@ kenji.exe service uninstall
 
 Quick Tunnel はアカウント不要ですが、恒常利用には Named Tunnel（独自ドメイン・Cloudflare Access によるZero Trust保護）を推奨します。
 
+## CLIログインとターミナル操作
+
+Kenjiの各ユーザーはターミナルから利用するCLIへ個別にログインします。利用したいユーザーでログインし、初回にそれぞれ実行してください:
+
+```powershell
+opencode auth login
+claude   # 表示される手順でClaude Codeにログイン
+omp      # Oh My Piの認証/セットアップ手順
+```
+
+ログイン状態は `data-dir/profiles/<ユーザーID>/` の各ツール専用領域に保存されます（ユーザーIDは内部用のハッシュです）。OpenCodeは `XDG_DATA_HOME` と `OPENCODE_CONFIG_DIR`、Claude Codeは `CLAUDE_CONFIG_DIR`、Oh My Piは `PI_CONFIG_DIR` で分離します。サーバー環境から継承した一般的なプロバイダーAPIキーはCLIプロセスに渡しません。
+
+ターミナルでは文字をドラッグ選択して「コピー」、または `Ctrl+Shift+C` でコピーし、「貼り付け」または `Ctrl+Shift+V` で貼り付けできます。ブラウザのクリップボード許可が必要です（HTTPSまたはlocalhostで利用）。
+
 ## CLI
 
 ```
@@ -92,6 +106,8 @@ Invoke-RestMethod http://127.0.0.1:8787/api/system/overview -Headers $H
 - ファイル操作は既定で各ユーザーの専用フォルダ（`workspace/<ユーザー名>`）配下に限定されます。APIキーは `workspace/_shared` を共有します
 - **管理者のみ** `scope=system` でPC全体（全ドライブ）の読み書きができます。ドライブ直下、`Windows`、`Program Files`、`ProgramData`、ユーザープロファイル直下などの削除・移動と、Kenji の機密ファイル（`auth.json` / `users.db*` / `config.json` / `jobs.json`）の削除・移動・上書きは拒否されます
 - ターミナルとジョブの既定ディレクトリもユーザー専用フォルダです（ターミナル/ジョブ自体はサービスアカウント権限で動作するため、OSレベルのサンドボックスではありません）
+- ターミナルから起動するOpenCode / Claude Code / Oh My Pi (OMP) はKenjiユーザーごとの設定ディレクトリを使用し、親プロセスから引き継いだ一般的なプロバイダーAPIキーは除去します。初回は各CLIの `auth login` 等を各ユーザーのターミナルで実行してください。プロファイルは `data-dir/profiles/` に保存されます
+- **注意:** Kenjiユーザーのプロファイル分離は誤共有を防ぐもので、同一Windowsサービスアカウント内のOSセキュリティ境界ではありません。ターミナルで任意コマンドを実行できる利用者同士を相互に隔離するには、別Windowsアカウント／VM等が必要です
 - 外部公開は Cloudflare Tunnel 経由のみ（localhost バインド + エッジTLS）。Cloudflare Access 併用を推奨
 
 ## スモークテスト
