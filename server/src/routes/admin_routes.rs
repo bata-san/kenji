@@ -7,6 +7,50 @@ use crate::error::{ApiError, ApiResult};
 use crate::routes::AuthCtx;
 use crate::state::{role_str, SharedState};
 
+/// Read the native ngrok Windows service state without spawning a shell or
+/// exposing agent configuration / credentials through the API.
+#[cfg(windows)]
+fn ngrok_service_status() -> serde_json::Value {
+    use windows_service::service::{ServiceAccess, ServiceState};
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+
+    let manager = match ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+    {
+        Ok(manager) => manager,
+        Err(_) => {
+            return serde_json::json!({"installed":false,"running":false,"status":"unavailable"})
+        }
+    };
+    let service = match manager.open_service("ngrok", ServiceAccess::QUERY_STATUS) {
+        Ok(service) => service,
+        Err(_) => {
+            return serde_json::json!({"installed":false,"running":false,"status":"not_installed"})
+        }
+    };
+    match service.query_status() {
+        Ok(status) => {
+            let state = match status.current_state {
+                ServiceState::Running => "running",
+                ServiceState::Stopped => "stopped",
+                ServiceState::StartPending => "starting",
+                ServiceState::StopPending => "stopping",
+                _ => "pending",
+            };
+            serde_json::json!({
+                "installed":true,
+                "running":status.current_state == ServiceState::Running,
+                "status":state,
+            })
+        }
+        Err(_) => serde_json::json!({"installed":true,"running":false,"status":"unavailable"}),
+    }
+}
+
+#[cfg(not(windows))]
+fn ngrok_service_status() -> serde_json::Value {
+    serde_json::json!({"installed":false,"running":false,"status":"unsupported"})
+}
+
 async fn settings_value(state: &SharedState) -> serde_json::Value {
     let cfg = state.config.read().unwrap_or_else(|e| e.into_inner());
     serde_json::json!({
@@ -16,6 +60,7 @@ async fn settings_value(state: &SharedState) -> serde_json::Value {
         "port": cfg.port,
         "version": state.version,
         "tunnel": state.tunnel.info(),
+        "ngrok": ngrok_service_status(),
         "update": cfg.update,
         "resources": state.jobs.resources.status(),
         "repair": cfg.repair,

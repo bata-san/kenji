@@ -91,6 +91,13 @@ export interface TunnelInfo {
   status: string;
 }
 
+/** Native Windows ngrok service status (independent of cloudflared). */
+export interface NgrokServiceInfo {
+  installed: boolean;
+  running: boolean;
+  status: 'running' | 'stopped' | 'starting' | 'stopping' | 'pending' | 'not_installed' | 'unavailable' | 'unsupported';
+}
+
 export interface Overview {
   hostname: string;
   os: string;
@@ -182,6 +189,7 @@ export interface Settings {
   port: number;
   version: string;
   tunnel: TunnelInfo;
+  ngrok?: NgrokServiceInfo;
   update: UpdateConfigInfo;
   resources: ResourceStatus;
   repair: RepairConfig;

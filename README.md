@@ -6,8 +6,8 @@
 - **リモートターミナル**: PowerShell（ConPTY）をブラウザから操作。タブ作成・自動再接続・見やすい配色・コピー＆ペースト対応で、画面移動・再読み込み後もセッションを継続
 - **ファイル管理**: ユーザーごとの専用フォルダ内でアップロード/ダウンロード/リネーム/削除。管理者は「PC全体」モードで全ドライブを操作可能（重要領域は保護）
 - **リソース監視**: CPU / メモリ / ディスク / GPU（NVIDIA）
-- **遠隔アクセス**: Cloudflare Tunnel でポート開放・固定IP不要
-- **常駐動作**: Windows Service として自動起動
+- **遠隔アクセス**: Cloudflare Tunnel または ngrok でポート開放・固定IP不要
+- **常駐動作**: Windows Service として自動起動。ngrokとの一括サービス登録にも対応
 - **セキュリティ**: SQLiteユーザー管理 + JWTログイン + APIキー + 3段階ロール（viewer / operator / admin）+ 監査ログ + ログインロックアウト
 
 設計の詳細は [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)、API仕様は [docs/api.md](docs/api.md) を参照してください。
@@ -54,6 +54,18 @@ sc start kenji                                   # サービス開始
 sc stop kenji
 kenji.exe service uninstall
 ```
+
+## 本番導入（Kenji + ngrok の一括サービス登録）
+
+ngrokを本番で使う場合、既存のngrok設定ファイルを維持したまま、Kenji本体とngrokを別々のWindowsサービスとして一括登録できます。
+
+```powershell
+# 管理者権限の PowerShell。リポジトリのルートから実行
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows-services.ps1 -NgrokConfig "C:\ProgramData\kenji\ngrok.yml" -KenjiExe ".\target\release\kenji.exe" -AllowLocalSystem
+Get-Service kenji,ngrok
+```
+
+Kenjiの初期設定、両サービスの自動起動、異常終了時のSCM再起動設定を行います。`-AllowLocalSystem` は既定のSYSTEM権限で新規登録することへの明示的な同意です（本番では専用アカウント推奨）。ngrokの認証トークンはKenjiへコピーしません。既存サービスは再登録・上書きせず、状態確認に利用します。詳しい条件・セキュリティ上の注意は [Windows Service 導入ガイド](docs/WINDOWS_SERVICE.md) に記載しています。
 
 ## 外部アクセス（Cloudflare Tunnel）
 
@@ -108,7 +120,7 @@ Invoke-RestMethod http://127.0.0.1:8787/api/system/overview -Headers $H
 - ターミナルとジョブの既定ディレクトリもユーザー専用フォルダです（ターミナル/ジョブ自体はサービスアカウント権限で動作するため、OSレベルのサンドボックスではありません）
 - ターミナルから起動するOpenCode / Claude Code / Oh My Pi (OMP) はKenjiユーザーごとの設定ディレクトリを使用し、親プロセスから引き継いだ一般的なプロバイダーAPIキーは除去します。初回は各CLIの `auth login` 等を各ユーザーのターミナルで実行してください。プロファイルは `data-dir/profiles/` に保存されます
 - **注意:** Kenjiユーザーのプロファイル分離は誤共有を防ぐもので、同一Windowsサービスアカウント内のOSセキュリティ境界ではありません。ターミナルで任意コマンドを実行できる利用者同士を相互に隔離するには、別Windowsアカウント／VM等が必要です
-- 外部公開は Cloudflare Tunnel 経由のみ（localhost バインド + エッジTLS）。Cloudflare Access 併用を推奨
+- 外部公開は localhost バインドと Cloudflare Tunnel または ngrok を組み合わせます。トンネル側の認証・アクセス制限を推奨します
 
 ## スモークテスト
 
