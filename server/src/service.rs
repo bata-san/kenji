@@ -6,7 +6,8 @@ use std::sync::mpsc;
 
 use anyhow::{Context, Result};
 use windows_service::service::{
-    ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
+    ServiceAccess, ServiceAction, ServiceActionType, ServiceControl, ServiceControlAccept,
+    ServiceErrorControl, ServiceExitCode, ServiceFailureActions, ServiceFailureResetPeriod,
     ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
 };
 use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
@@ -183,9 +184,36 @@ pub fn install(account: Option<(String, String)>) -> Result<()> {
         account_name: account.as_ref().map(|a| OsString::from(&a.0)),
         account_password: account.as_ref().map(|a| OsString::from(&a.1)),
     };
-    manager
-        .create_service(&info, ServiceAccess::QUERY_STATUS)
+    let service = manager
+        .create_service(
+            &info,
+            ServiceAccess::QUERY_STATUS | ServiceAccess::CHANGE_CONFIG,
+        )
         .context("サービスの登録に失敗")?;
+    service
+        .update_failure_actions(ServiceFailureActions {
+            reset_period: ServiceFailureResetPeriod::After(std::time::Duration::from_secs(86_400)),
+            reboot_msg: None,
+            command: None,
+            actions: Some(vec![
+                ServiceAction {
+                    action_type: ServiceActionType::Restart,
+                    delay: std::time::Duration::from_secs(5),
+                },
+                ServiceAction {
+                    action_type: ServiceActionType::Restart,
+                    delay: std::time::Duration::from_secs(30),
+                },
+                ServiceAction {
+                    action_type: ServiceActionType::Restart,
+                    delay: std::time::Duration::from_secs(120),
+                },
+            ]),
+        })
+        .context("サービスの自動復旧設定に失敗")?;
+    service
+        .set_failure_actions_on_non_crash_failures(true)
+        .context("サービスの異常終了復旧設定に失敗")?;
     if account.is_none() {
         println!("注意: LocalSystem (SYSTEM) として登録されました。");
         println!("      遠隔操作の権限を絞るため、標準ユーザーアカウントでの実行を推奨します:");

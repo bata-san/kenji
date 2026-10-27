@@ -56,8 +56,10 @@ function Assert-ExitCode([string]$Operation) {
 function Set-ServiceRecovery([string]$Name) {
     & "$env:SystemRoot\System32\sc.exe" config $Name 'start=' 'auto' | Out-Null
     Assert-ExitCode "$Name の自動起動設定"
-    & "$env:SystemRoot\System32\sc.exe" failure $Name 'reset=' '86400' 'actions=' 'restart/60000/restart/60000/restart/60000' | Out-Null
+    & "$env:SystemRoot\System32\sc.exe" failure $Name 'reset=' '86400' 'actions=' 'restart/5000/restart/30000/restart/120000' | Out-Null
     Assert-ExitCode "$Name の障害復旧設定"
+    & "$env:SystemRoot\System32\sc.exe" failureflag $Name 1 | Out-Null
+    Assert-ExitCode "$Name の異常終了復旧設定"
 }
 
 function Start-IfStopped([string]$Name) {

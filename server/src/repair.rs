@@ -76,6 +76,36 @@ pub fn status(data: &Path) -> serde_json::Value {
         .and_then(|raw| serde_json::from_slice(&raw).ok())
         .unwrap_or_else(|| serde_json::json!({"state":"idle"}))
 }
+
+fn record_crash(data: &Path, pid: u32, code: u32) -> Result<PathBuf> {
+    let incident_dir = data.join("repair").join("incidents");
+    std::fs::create_dir_all(&incident_dir)?;
+    let incident_path = incident_dir.join(format!(
+        "{}-{pid}.json",
+        chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ")
+    ));
+    let tmp = incident_path.with_extension("json.tmp");
+    let incident = serde_json::json!({
+        "observed_at": chrono::Utc::now(),
+        "process_id": pid,
+        "exit_code": format!("0x{code:08x}"),
+        "version": env!("CARGO_PKG_VERSION"),
+        "diagnosis_state": "pending",
+    });
+    std::fs::write(&tmp, serde_json::to_vec_pretty(&incident)?)?;
+    std::fs::rename(tmp, &incident_path)?;
+    record(
+        data,
+        serde_json::json!({
+            "state": "crash_detected",
+            "incident_file": incident_path,
+            "process_id": pid,
+            "exit_code": format!("0x{code:08x}"),
+            "automatic_deployment": false,
+        }),
+    )?;
+    Ok(incident_path)
+}
 fn record(data: &Path, value: serde_json::Value) -> Result<()> {
     let dir = data.join("repair");
     std::fs::create_dir_all(&dir)?;
@@ -151,12 +181,13 @@ pub fn watch(pid: u32, data: PathBuf) -> Result<()> {
         if code == 0 {
             return Ok(());
         }
+        record_crash(&data, pid, code)?;
         let cfg = crate::config::Config::load(&data)?;
         if cfg.repair.enabled {
             run(
                 &data,
                 &cfg.repair,
-                &format!("server process exited abnormally: 0x{code:08x}"),
+                &format!("server process {pid} exited abnormally with code 0x{code:08x}"),
             )?;
         }
     }
@@ -279,6 +310,7 @@ pub fn run(data: &Path, cfg: &RepairConfig, incident: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
     #[test]
     fn provider_config_rejects_unsafe_values() {
         let mut config = RepairConfig::default();
@@ -290,5 +322,17 @@ mod tests {
         config.base_url = "https://example.com/v1".into();
         config.api_key_env = "!print-secret".into();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn crash_incident_is_persisted_without_logs_or_secrets() {
+        let data = tempdir().unwrap();
+        let incident = record_crash(data.path(), 1234, 0xC0000005).unwrap();
+        let details: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(incident).unwrap()).unwrap();
+        assert_eq!(details["process_id"], 1234);
+        assert_eq!(details["exit_code"], "0xc0000005");
+        assert_eq!(status(data.path())["state"], "crash_detected");
+        assert_eq!(status(data.path())["automatic_deployment"], false);
     }
 }

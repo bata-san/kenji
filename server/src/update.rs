@@ -442,7 +442,11 @@ fn download_and_verify_impl(release: &Release, dest: &Path, tmp: &Path) -> Resul
 }
 
 fn old_binary_path(exe: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.old", exe.display()))
+    // `Path::display()` is lossy for non-Unicode Windows paths. Keep the
+    // original OsStr intact (user profile paths commonly contain Japanese).
+    let mut path = exe.as_os_str().to_os_string();
+    path.push(".old");
+    PathBuf::from(path)
 }
 
 /// Hot-swap: the running exe can be renamed on Windows; put the new one in place.
@@ -601,33 +605,63 @@ pub fn finalize(
         &format!("finalize開始 (wait_pid={wait_pid:?}, service={service}, relaunch={relaunch:?})"),
     );
     let deadline = std::time::Instant::now() + Duration::from_secs(FINALIZE_TIMEOUT_SECS);
+    let mut predecessor_stopped = false;
     loop {
         if service {
             #[cfg(windows)]
             {
                 if service_stopped() {
+                    predecessor_stopped = true;
                     break;
                 }
             }
             #[cfg(not(windows))]
             {
+                predecessor_stopped = true;
                 break;
             }
         } else if let Some(pid) = wait_pid {
             if !pid_alive(pid) {
+                predecessor_stopped = true;
                 break;
             }
         } else {
+            predecessor_stopped = true;
             break;
         }
         if std::time::Instant::now() >= deadline {
             finalize_log(
                 &data_dir,
-                "タイムアウト: 前プロセスの停止を確認できませんでした。念のため再起動を試みます",
+                "タイムアウト: 前プロセスの停止を確認できませんでした",
             );
             break;
         }
         std::thread::sleep(Duration::from_millis(500));
+    }
+    if !predecessor_stopped {
+        // Starting another copy while the old server still owns its executable
+        // image can leave the old `.old` file locked and make the next update
+        // fail with Access Denied. Preserve the running instance; an operator
+        // can stop it and start the already-installed executable safely.
+        let still_running = if service {
+            #[cfg(windows)]
+            {
+                !service_stopped()
+            }
+            #[cfg(not(windows))]
+            {
+                false
+            }
+        } else {
+            wait_pid.is_some_and(pid_alive)
+        };
+        if still_running {
+            finalize_log(
+                &data_dir,
+                "旧プロセスが稼働中のため新バイナリの重複起動を中止しました。旧プロセスを停止後に新バイナリを起動してください",
+            );
+            return 1;
+        }
     }
     std::thread::sleep(Duration::from_millis(500)); // settle sockets / SCM transitions
 
@@ -753,6 +787,17 @@ mod tests {
         assert_eq!(std::fs::read(&exe).unwrap(), b"THIRD");
         assert_eq!(std::fs::read(old_binary_path(&exe)).unwrap(), b"NEWNEW");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_binary_path_preserves_non_ascii_windows_user_path() {
+        let exe = PathBuf::from(r"C:\Users\川畑陽樹\kenji\target\debug\kenji.exe");
+        let backup = old_binary_path(&exe);
+        assert_eq!(
+            backup,
+            PathBuf::from(r"C:\Users\川畑陽樹\kenji\target\debug\kenji.exe.old")
+        );
+        assert!(backup.to_string_lossy().contains("川畑陽樹"));
     }
 
     /// Minimal HTTP server: serves a fixed map of path → (status, body).
